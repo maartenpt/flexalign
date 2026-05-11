@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flexalign"
+version = "0.0.1"
+description = "Modular alignment tool for parallel TEI/XML corpora at text/chapter/p/s/tok levels."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Maarten Janssen" },
+]
+keywords = ["alignment", "TEI", "TEITOK", "parallel-corpus", "translation-units"]
+dependencies = [
+    "lxml>=4.9",
+]
+
+[project.optional-dependencies]
+hunalign = []
+awesome = ["transformers>=4.20", "torch>=2.0"]
+labse = ["sentence-transformers>=2.2", "polyfuzz>=0.4"]
+all = [
+    "transformers>=4.20",
+    "torch>=2.0",
+    "sentence-transformers>=2.2",
+    "polyfuzz>=0.4",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+flexalign = "flexalign.__main__:main"
+
+[project.entry-points."flexalign.backends"]
+
+[tool.setuptools.packages.find]
+include = ["flexalign*"]
+exclude = ["tests*", "dev*", "git*"]
+
+[tool.pytest.ini_options]
+testpaths = ["flexalign/tests"]
+addopts = "-q"

@@ -1,0 +1,18 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Local/dev artifacts
+*.log
+tmp/
+git/
+dev/
+tests/
+
+# Managed separately in TEITOK git; kept local here
+teitok-module/
+
+# Local release backups
+backups/
