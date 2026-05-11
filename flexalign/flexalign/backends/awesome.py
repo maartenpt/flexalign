@@ -8,8 +8,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from math import sqrt
 
-from ..backend_spec import BackendSpec, StepSpec
 from ..align.rollup import chunk_sentence_windows
+from ..align.segment_adapter import segment_views_from_align_doc
+from ..backend_spec import BackendSpec, StepSpec
 
 
 @dataclass
@@ -90,14 +91,15 @@ class AwesomeBackend:
 
     def _collect_tokens(self, doc) -> dict[str, list[_TokenUnit]]:
         grouped: dict[str, list[_TokenUnit]] = defaultdict(list)
-        for unit in doc.iter_units("tok"):
-            token = _TokenUnit(unit_id=unit.unit_id, text=unit.text, tuid=unit.element.get("tuid"))
-            sentence_tuids = self._sentence_tuids_for_token(unit.element)
+        for view in segment_views_from_align_doc(doc, "tok"):
+            token = _TokenUnit(unit_id=view.anchor_id, text=view.text, tuid=view.tuid)
+            el = view.element
+            sentence_tuids = self._sentence_tuids_for_token(el) if el is not None else []
             if sentence_tuids:
                 for sentence_tuid in sentence_tuids:
                     grouped[sentence_tuid].append(token)
                 continue
-            grouped[self._sentence_key(unit.unit_id, token.tuid)].append(token)
+            grouped[self._sentence_key(view.anchor_id, token.tuid)].append(token)
         return grouped
 
     @staticmethod
@@ -203,7 +205,10 @@ class AwesomeBackend:
         options = options or {}
         level = step.level if step else "s"
         # Demonstrate chunking behavior on long text spans for rollup paths.
-        windows = chunk_sentence_windows([u.text for u in src.iter_units(level)], subtoken_cap=options.get("subtoken_cap", 480))
+        windows = chunk_sentence_windows(
+            [u.text for u in segment_views_from_align_doc(src, level)],
+            subtoken_cap=options.get("subtoken_cap", 480),
+        )
         _ = windows
 
         if level != "tok":

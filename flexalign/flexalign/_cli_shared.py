@@ -7,6 +7,8 @@ import argparse
 TASK_CHOICES = (
     "align",
     "cascade",
+    "convert",
+    "plain",
     "reconcile",
     "apply",
     "apply-tok-refs",

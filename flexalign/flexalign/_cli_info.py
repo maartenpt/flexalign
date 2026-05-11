@@ -9,6 +9,7 @@ from pathlib import Path
 from .backend_registry import list_backends
 from .io.alignment_sets import (
     list_alignment_sets,
+    list_pair_json_candidates_for_set,
     resolve_alignment_set_documents,
     resolve_alignment_set_members_detailed,
     resolve_alignment_set_plan,
@@ -89,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "members": resolve_alignment_set_members_detailed(
                 args.set_id, project_root=project_root, force_refresh=bool(args.refresh_cache)
+            ),
+            "pair_json_candidates": list_pair_json_candidates_for_set(
+                args.set_id, project_root=project_root, max_files=200
             ),
         }
     elif args.info_action == "fragment":

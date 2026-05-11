@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from ..align.segment_adapter import segment_attr_for_align, segment_views_from_align_doc
 from ..backend_spec import BackendSpec, StepSpec
 
 
@@ -30,34 +31,34 @@ class AttributeBackend:
         attr = options.get("attr", "n")
         normalize = options.get("normalize", False)
         src_index = {}
-        for unit in src.iter_units(level):
-            key = unit.element.get(attr) or unit.element.get("{http://www.w3.org/XML/1998/namespace}id") or unit.unit_id
+        for view in segment_views_from_align_doc(src, level):
+            key = segment_attr_for_align(view, attr)
             if not key:
                 continue
             if normalize:
                 key = verse_normalizer(key)
-            src_index.setdefault(key, []).append(unit)
+            src_index.setdefault(key, []).append(view)
         rows = []
-        for unit in tgt.iter_units(level):
-            key = unit.element.get(attr) or unit.element.get("{http://www.w3.org/XML/1998/namespace}id") or unit.unit_id
+        for view in segment_views_from_align_doc(tgt, level):
+            key = segment_attr_for_align(view, attr)
             if not key:
                 continue
             if normalize:
                 key = verse_normalizer(key)
             matches = src_index.get(key, [])
-            for source_unit in matches:
+            for source_view in matches:
                 alignment_basis = f"attribute:{attr}"
                 rows.append(
                     {
-                        "id1": [source_unit.unit_id],
-                        "id2": [unit.unit_id],
-                        "text1": source_unit.text,
-                        "text2": unit.text,
+                        "id1": [source_view.anchor_id],
+                        "id2": [view.anchor_id],
+                        "text1": source_view.text,
+                        "text2": view.text,
                         "score": 1.0,
                         "edit": "auto",
                         "alignment_basis": alignment_basis,
-                        "tuid_at_write_1": source_unit.element.get("tuid"),
-                        "tuid_at_write_2": unit.element.get("tuid"),
+                        "tuid_at_write_1": source_view.tuid,
+                        "tuid_at_write_2": view.tuid,
                     }
                 )
         return rows

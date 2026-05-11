@@ -19,9 +19,11 @@ dependencies = [
 
 [project.optional-dependencies]
 hunalign = []
+plain = ["langdetect>=1.0.9"]
 awesome = ["transformers>=4.20", "torch>=2.0"]
 labse = ["sentence-transformers>=2.2", "polyfuzz>=0.4"]
 all = [
+    "langdetect>=1.0.9",
     "transformers>=4.20",
     "torch>=2.0",
     "sentence-transformers>=2.2",

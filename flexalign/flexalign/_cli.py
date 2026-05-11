@@ -115,6 +115,156 @@ def _build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--output", required=True)
     rec.add_argument("--ignore-tuid-drift", action="store_true")
 
+    conv = subparsers.add_parser(
+        "convert",
+        help="Convert alignment between pair JSON, reconcile JSON, TMX, Moses parallel text, and TEI TUID writeback.",
+    )
+    conv.add_argument("--from", dest="from_fmt", required=True, help="Source format: pair, reconcile, tmx, moses")
+    conv.add_argument(
+        "--to",
+        dest="to_fmt",
+        required=True,
+        help="Target format: pair, reconcile, tmx, moses, teitok (new TEI/XML), tei-writeback (apply tuids to existing XML)",
+    )
+    conv.add_argument(
+        "--input",
+        required=True,
+        help="Primary input file (pair/reconcile JSON, TMX, or Moses source side)",
+    )
+    conv.add_argument(
+        "--output",
+        required=True,
+        help="Output path (format-specific). For teitok/tei: new TEI file. For tei-writeback: still required; pivot/target XML paths come from the document.",
+    )
+    conv.add_argument(
+        "--moses-secondary",
+        default=None,
+        help="Moses target corpus path (required for from/to moses: parallel other-language file)",
+    )
+    conv.add_argument(
+        "--version1",
+        default=None,
+        help="Document path for pivot side (reconcile import: must match keys in reconcile JSON members)",
+    )
+    conv.add_argument(
+        "--version2",
+        default=None,
+        help="Document path for target side (reconcile import: must match keys in reconcile JSON members)",
+    )
+    conv.add_argument("--level", default="s", help="Alignment level metadata (default: s)")
+    conv.add_argument(
+        "--lang-src",
+        default=None,
+        help="TMX/teitok: source xml:lang (optional; from TMX <tu srclang> / first tuv when omitted)",
+    )
+    conv.add_argument(
+        "--lang-tgt",
+        default=None,
+        help="TMX/teitok: target xml:lang (optional; from second tuv / non-srclang side when omitted)",
+    )
+    conv.add_argument("--ids-path", default=None, help="Moses import: optional one-id-per-line sidecar shared by both sides")
+    conv.add_argument("--moses-ids-out", default=None, help="Moses export: optional path to write anchor ids (pipe-separated if many)")
+    conv.add_argument("--pivot", default=None, help="tei-writeback: pivot TEI/XML path (propagates tuids onto version2 in the pair document)")
+    conv.add_argument(
+        "--project-root",
+        default=None,
+        help="tei-writeback / pair paths: project root for resolving relative paths in the alignment document",
+    )
+    conv.add_argument("--out-dir", default=None, help="tei-writeback: write modified XML under this directory")
+    conv.add_argument("--ignore-tuid-drift", action="store_true", help="tei-writeback: do not abort on tuid drift")
+    conv.add_argument("--invalidate-below", action="store_true", help="tei-writeback: strip orphan tuids")
+    conv.add_argument("--mark-needs-review", action="store_true", help="tei-writeback: mark unexpected tuids for review")
+    conv.add_argument(
+        "--tuid-max-length",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "When writing TMX/teitok (no --tuid-prefix): shorten fragments longer than N chars to t+hex. "
+            "0 = keep verbatim source tuids (default). Ignored when --tuid-prefix is set."
+        ),
+    )
+    conv.add_argument(
+        "--tuid-prefix",
+        default=None,
+        metavar="PREFIX",
+        help=(
+            "When writing TMX/teitok: emit tuids as PREFIX-s1, PREFIX-s2, … (PREFIX-w1, … at --level tok). "
+            "PREFIX is sanitized for XML; supply a corpus or set id (e.g. vec.common-voice-conv)."
+        ),
+    )
+    conv.add_argument(
+        "--compact-tuids",
+        action="store_true",
+        help=(
+            "After load, rewrite all tuid_at_write_* in the IR: with --tuid-prefix, same ordinal scheme as export; "
+            "otherwise use --tuid-max-length, defaulting to 56 for hash compaction when max is 0."
+        ),
+    )
+
+    plain = subparsers.add_parser(
+        "plain",
+        help="Plain-text witnesses: segment to minimal TEI, align, then use convert for TMX/Moses/etc.",
+    )
+    plain_sub = plain.add_subparsers(dest="plain_action", required=True)
+    pprep = plain_sub.add_parser(
+        "prepare",
+        help="Convert each matching .txt under a directory to minimal TEI (s or tok) for use with flexalign align.",
+    )
+    pprep.add_argument("--input-dir", required=True, type=Path, help="Directory containing plain text files")
+    pprep.add_argument("--out-dir", required=True, type=Path, help="Directory to write *.tei.xml files into")
+    pprep.add_argument(
+        "--glob",
+        dest="file_glob",
+        default="*.txt",
+        help="Glob pattern relative to input-dir (default: *.txt)",
+    )
+    pprep.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Use recursive glob (rglob) from input-dir",
+    )
+    pprep.add_argument("--level", choices=("s", "tok"), default="s", help="Structural level to emit (default: s)")
+    pprep.add_argument(
+        "--segmenter",
+        choices=("builtin", "flexipipe"),
+        default="builtin",
+        help="builtin: simple rules; flexipipe: flexipipe.doc.Document.from_plain_text (requires flexipipe installed)",
+    )
+    pprep.add_argument("--lang", default=None, help="BCP47 language for xml:lang on <text> (optional)")
+    pprep.add_argument(
+        "--lang-detect",
+        action="store_true",
+        help="Guess language per file with langdetect when --lang is not set (optional dependency)",
+    )
+    pprep.add_argument("--manifest", default=None, type=Path, help="Write a JSON manifest of generated witnesses")
+
+    pap = plain_sub.add_parser(
+        "align-pair",
+        help="Align two .txt or TEI paths: wrap plain text to TEI in --work-dir, run align, write pair JSON; optional TMX/Moses export.",
+    )
+    pap.add_argument("pivot", type=Path, help="Pivot plain .txt or TEI/XML path")
+    pap.add_argument("target", type=Path, help="Target plain .txt or TEI/XML path")
+    pap.add_argument("--output", required=True, type=Path, help="Output pair JSON path")
+    pap.add_argument(
+        "--work-dir",
+        type=Path,
+        default=None,
+        help="Directory for generated TEI when inputs are .txt (default: .flexalign_plain_work under cwd)",
+    )
+    pap.add_argument("--backend", default="identity")
+    pap.add_argument("--level", choices=("s", "tok"), default="s")
+    pap.add_argument("--attr", default="xml:id")
+    pap.add_argument("--segmenter", choices=("builtin", "flexipipe"), default="builtin")
+    pap.add_argument("--lang", default=None, help="Optional xml:lang when wrapping plain .txt files")
+    pap.add_argument("--lang-detect", action="store_true", help="Guess language when wrapping .txt (langdetect)")
+    pap.add_argument("--export-tmx", type=Path, default=None, help="Also write this TMX path after alignment")
+    pap.add_argument("--tmx-lang-src", default=None, help="TMX source xml:lang (default: en)")
+    pap.add_argument("--tmx-lang-tgt", default=None, help="TMX target xml:lang (default: und)")
+    pap.add_argument("--export-moses-src", type=Path, default=None, help="Moses-style source lines output")
+    pap.add_argument("--export-moses-tgt", type=Path, default=None, help="Moses-style target lines output")
+    pap.add_argument("--export-moses-ids", type=Path, default=None, help="Optional Moses id sidecar when exporting")
+
     app = subparsers.add_parser("apply")
     app.add_argument("path")
     app.add_argument("--pivot")
@@ -260,6 +410,75 @@ def main(argv: list[str] | None = None) -> int:
         payload = reconcile_files(args.pair_files, args.level, ignore_tuid_drift=args.ignore_tuid_drift)
         Path(args.output).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return 0
+    if args.task == "convert":
+        from .io.convert_runner import run_convert
+
+        run_convert(
+            from_fmt=args.from_fmt,
+            to_fmt=args.to_fmt,
+            input_path=Path(args.input),
+            output_path=Path(args.output),
+            moses_secondary=Path(args.moses_secondary) if getattr(args, "moses_secondary", None) else None,
+            version1=getattr(args, "version1", None),
+            version2=getattr(args, "version2", None),
+            lang_src=getattr(args, "lang_src", None),
+            lang_tgt=getattr(args, "lang_tgt", None),
+            level=getattr(args, "level", "s") or "s",
+            ids_path=getattr(args, "ids_path", None),
+            pivot_path=getattr(args, "pivot", None),
+            project_root=getattr(args, "project_root", None),
+            out_dir=getattr(args, "out_dir", None),
+            ignore_tuid_drift=bool(getattr(args, "ignore_tuid_drift", False)),
+            invalidate_below=bool(getattr(args, "invalidate_below", False)),
+            mark_needs_review=bool(getattr(args, "mark_needs_review", False)),
+            moses_ids_out=getattr(args, "moses_ids_out", None),
+            tuid_max_length=int(getattr(args, "tuid_max_length", 0) or 0),
+            compact_tuids=bool(getattr(args, "compact_tuids", False)),
+            tuid_prefix=getattr(args, "tuid_prefix", None),
+        )
+        return 0
+    if args.task == "plain":
+        from .io import plain_pipeline as plain_pipeline_mod
+
+        if args.plain_action == "prepare":
+            manifest = plain_pipeline_mod.prepare_directory(
+                Path(args.input_dir),
+                Path(args.out_dir),
+                glob_pattern=str(args.file_glob),
+                recursive=bool(args.recursive),
+                level=str(args.level),
+                segmenter=str(args.segmenter),
+                default_lang=getattr(args, "lang", None),
+                detect_lang=bool(args.lang_detect),
+                manifest_path=Path(args.manifest) if getattr(args, "manifest", None) else None,
+            )
+            print(json.dumps(manifest, ensure_ascii=False, indent=2))
+            return 0
+        if args.plain_action == "align-pair":
+            work = args.work_dir
+            if work is None:
+                work = Path.cwd() / ".flexalign_plain_work"
+            summary = plain_pipeline_mod.align_plain_or_tei_pair(
+                Path(args.pivot),
+                Path(args.target),
+                Path(args.output),
+                work_dir=work,
+                backend=str(args.backend),
+                level=str(args.level),
+                attr=str(args.attr),
+                segmenter=str(args.segmenter),
+                lang=getattr(args, "lang", None),
+                detect_lang=bool(args.lang_detect),
+                export_tmx=Path(args.export_tmx) if getattr(args, "export_tmx", None) else None,
+                export_tmx_lang_src=getattr(args, "tmx_lang_src", None),
+                export_tmx_lang_tgt=getattr(args, "tmx_lang_tgt", None),
+                export_moses_src=Path(args.export_moses_src) if getattr(args, "export_moses_src", None) else None,
+                export_moses_tgt=Path(args.export_moses_tgt) if getattr(args, "export_moses_tgt", None) else None,
+                export_moses_ids=Path(args.export_moses_ids) if getattr(args, "export_moses_ids", None) else None,
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+        raise ValueError(f"Unknown plain action: {args.plain_action!r}")
     if args.task == "apply":
         pr_apply = Path(args.project_root).resolve() if getattr(args, "project_root", None) else None
         apply_from_path(

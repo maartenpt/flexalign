@@ -787,6 +787,58 @@ def set_alignment_set_pivot(
     return path
 
 
+def list_pair_json_candidates_for_set(
+    set_id: str,
+    project_root: Path | None = None,
+    *,
+    max_files: int = 200,
+) -> list[dict[str, Any]]:
+    """
+    List project-relative pair JSON paths under ``Alignments/Pairs/{set_id}/`` (newest first).
+
+    Each item has at least ``path`` and ``mtime``; ``version1`` / ``version2`` are filled when the
+    file is valid JSON (used by UIs to pick the pair file for pivot/target witnesses).
+    """
+    root = (project_root or Path.cwd()).resolve()
+    seg = Path(str(set_id).replace("\\", "/")).name
+    if not seg or seg in {".", ".."} or ".." in str(set_id):
+        return []
+    pairs_dir = root / "Alignments" / "Pairs" / seg
+    if not pairs_dir.is_dir():
+        return []
+    collected: list[dict[str, Any]] = []
+    for pth in pairs_dir.rglob("*.json"):
+        if not pth.is_file():
+            continue
+        try:
+            rel = pth.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        snap: dict[str, Any] = {"path": rel, "mtime": int(pth.stat().st_mtime)}
+        try:
+            chunk = pth.read_text(encoding="utf-8", errors="replace")[:262144]
+            data = json.loads(chunk)
+        except (OSError, json.JSONDecodeError):
+            collected.append(snap)
+            continue
+        if isinstance(data, dict):
+            v1 = str(data.get("version1") or "").replace("\\", "/").strip() or None
+            v2 = str(data.get("version2") or "").replace("\\", "/").strip() or None
+            wf = data.get("flexalign_workflow")
+            if isinstance(wf, dict):
+                if not v1 and wf.get("source_xml"):
+                    v1 = str(wf["source_xml"]).replace("\\", "/").strip() or None
+                if not v2 and wf.get("target_xml"):
+                    v2 = str(wf["target_xml"]).replace("\\", "/").strip() or None
+            if v1:
+                snap["version1"] = v1
+            if v2:
+                snap["version2"] = v2
+        collected.append(snap)
+    collected.sort(key=lambda r: int(r.get("mtime") or 0), reverse=True)
+    return collected[: max(1, min(2000, max_files))]
+
+
 def resolve_alignment_set_plan(
     set_id: str, project_root: Path | None = None, pivot_mode: str = "first", force_refresh: bool = False
 ) -> dict[str, Any]:

@@ -3,6 +3,19 @@
 Operates on on-disk XML only; returns compact JSON-friendly rows. Alignment spine =
 elements at the chosen TEI level that carry ``@tuid`` (optionally extended later).
 
+**Empty ``<s/>`` + ``@sameAs`` (TEITOK-style overlap):** TEITOK often exposes a *string cut-out*
+from the serialized ``<s …/>`` through the **end of the last referenced token**, which may
+stop *inside* a wrapper (e.g. before ``</add>``) and is therefore **not guaranteed to be a
+single well-formed XML document**. Flexalign concatenates ``tostring(<s/>)`` with the
+serialization of each **top-level sibling** of ``<s>`` from the first sibling that contains
+the first ``sameAs`` id through the sibling that contains the last id
+(see :func:`_sameas_following_top_slice`). On a **deep copy** of that sibling span, we then
+**prune** everything that follows the last matched id *inside the final top-level sibling*
+(:func:`_sameas_prune_after_within_top`), so trailing ``<tok>`` / notes after the sentence’s
+last token are dropped while each emitted piece stays well-formed. TEITOK’s exact byte
+fragment can still differ (e.g. they may truncate mid-tag); matching that would need their
+offset logic or a dedicated partial serializer.
+
 Performance: the default implementation scans TEI with lxml. For production latency on
 large files, a future backend may delegate to **flexicorp-pando** / **xidx** byte-offset
 indexes (same JSON contract). See ``dev/tuview-design.md`` §2.3.
@@ -11,6 +24,7 @@ indexes (same JSON contract). See ``dev/tuview-design.md`` §2.3.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -187,6 +201,206 @@ def _serialize_aligned_element(elem: etree._Element) -> str:
     return etree.tostring(elem, encoding="unicode", pretty_print=True)
 
 
+def _sameas_ref_id_list(elem: etree._Element) -> list[str]:
+    """Parse TEI ``@sameAs`` / TEITOK ``@sameas`` into local id tokens (``#w-1`` → ``w-1``)."""
+    raw = (elem.get("sameAs") or elem.get("sameas") or "").strip()
+    if not raw:
+        return []
+    out: list[str] = []
+    for part in raw.replace(",", " ").split():
+        p = part.strip()
+        if not p:
+            continue
+        if p.startswith("#"):
+            p = p[1:]
+        if p:
+            out.append(p)
+    return out
+
+
+def _elem_identity_for_sameas(el: etree._Element) -> str:
+    """Resolve ``xml:id``, HTML ``id``, or ``@tuid`` (TEITOK ``<tok id=…>``)."""
+    return (
+        el.get(f"{{{_NS_XML}}}id")
+        or el.get("id")
+        or el.get("tuid")
+        or ""
+    ).strip()
+
+
+def _sameas_follower_elements(elem: etree._Element, ids: list[str]) -> list[etree._Element]:
+    """Collect leaf elements whose ids appear in ``@sameAs``, in **document order** after ``elem``.
+
+    Used to locate the span of real content (which may sit under ``<add>``, etc.). The actual
+    expansion uses :func:`_sameas_following_top_slice` so wrappers, notes, and element tails
+    are kept—not only a flattened list of ``<tok>`` nodes.
+    """
+    if not ids:
+        return []
+    parent = elem.getparent()
+    if parent is None:
+        return []
+    collected: list[etree._Element] = []
+    want_idx = 0
+    for sib in elem.itersiblings(preceding=False):
+        for node in sib.iter():
+            if want_idx >= len(ids):
+                break
+            if _elem_identity_for_sameas(node) == ids[want_idx]:
+                collected.append(node)
+                want_idx += 1
+        if want_idx >= len(ids):
+            break
+    return collected
+
+
+def _sameas_following_top_slice(elem: etree._Element, ids: list[str]) -> list[etree._Element]:
+    """Top-level siblings under ``elem``'s parent from the first to the last ``@sameAs`` hit (inclusive).
+
+    Preserves ``<add>``, ``<note>``, ``<hi>``, and other markup between empty ``<s/>`` and the
+    sentence's trailing tokens—unlike concatenating only the matched leaf nodes.
+
+    **Versus TEITOK:** TEITOK’s viewer fragment may end at the **last id-matched token** even
+    when that yields invalid XML. We take whole top-level siblings for that span, then prune
+    after the last id inside the copied **last** sibling so the emitted subtree is still
+    well-formed XML per root.
+    """
+    followers = _sameas_follower_elements(elem, ids)
+    if not followers:
+        return []
+    parent = elem.getparent()
+    if parent is None:
+        return []
+
+    def top_under_parent(child: etree._Element) -> etree._Element:
+        cur = child
+        while cur is not None and cur.getparent() is not None and cur.getparent() is not parent:
+            cur = cur.getparent()
+        return cur
+
+    start_top = top_under_parent(followers[0])
+    end_top = top_under_parent(followers[-1])
+    children = list(parent)
+    try:
+        i_s = children.index(start_top)
+        i_e = children.index(end_top)
+    except ValueError:
+        return []
+    if i_s > i_e:
+        i_s, i_e = i_e, i_s
+    return children[i_s : i_e + 1]
+
+
+def _sameas_corresponding_descendant(
+    copy_root: etree._Element, orig_root: etree._Element, orig_target: etree._Element
+) -> etree._Element | None:
+    """Locate the node in ``copy_root`` that mirrors ``orig_target`` under ``orig_root`` (same child indices)."""
+    if copy_root is None or orig_root is None or orig_target is None:
+        return None
+    if orig_target is orig_root:
+        return copy_root
+    idxs: list[int] = []
+    cur: etree._Element | None = orig_target
+    while cur is not None and cur is not orig_root:
+        parent = cur.getparent()
+        if parent is None:
+            return None
+        sibs = list(parent)
+        try:
+            idxs.append(sibs.index(cur))
+        except ValueError:
+            return None
+        cur = parent
+    idxs.reverse()
+    out: etree._Element = copy_root
+    for i in idxs:
+        ch = list(out)
+        if i < 0 or i >= len(ch):
+            return None
+        out = ch[i]
+    return out
+
+
+def _sameas_prune_after_within_top(top_copy: etree._Element, last_desc: etree._Element) -> None:
+    """Drop document-order content after ``last_desc`` within subtree ``top_copy`` (mutates ``top_copy``).
+
+    Removes following element siblings along the path from ``last_desc`` up to (but not past)
+    ``top_copy``, and clears ``last_desc.tail`` so text after the last matched token is not
+    kept.
+    """
+    if last_desc.getparent() is None:
+        return
+    cur: etree._Element | None = last_desc
+    while cur is not None and cur is not top_copy:
+        parent = cur.getparent()
+        if parent is None:
+            break
+        seen = False
+        for sib in list(parent):
+            if sib is cur:
+                seen = True
+                continue
+            if seen:
+                parent.remove(sib)
+        cur = parent
+    last_desc.tail = None
+
+
+def _expand_sameas_if_empty_sentence(
+    elem: etree._Element,
+    segments: list[dict[str, Any]],
+    text: str,
+    xml: str,
+) -> tuple[list[dict[str, Any]], str, str]:
+    """When an aligned unit is text-empty but lists ``@sameAs``, fold in those nodes for xml/segments/text.
+
+    The returned ``xml`` is ``tostring(<s/>)`` plus the serialization of a **deep copy** of
+    the top-level sibling span from :func:`_sameas_following_top_slice`, after pruning
+    everything that follows the last ``sameAs`` id inside the **last** of those siblings
+    (:func:`_sameas_prune_after_within_top`). That hides redundant markup after the last
+    matched token while keeping each root well-formed. Multiple roots in one string are
+    still possible (``<s/>`` + one or more siblings).
+    """
+    if text.strip():
+        return segments, text, xml
+    ids = _sameas_ref_id_list(elem)
+    if not ids:
+        return segments, text, xml
+    followers = _sameas_follower_elements(elem, ids)
+    if not followers:
+        return segments, text, xml
+    slice_els = _sameas_following_top_slice(elem, ids)
+    if not slice_els:
+        return segments, text, xml
+    slice_copies = [deepcopy(ch) for ch in slice_els]
+    last_orig = followers[-1]
+    tail_orig = slice_els[-1]
+    tail_copy = slice_copies[-1]
+    last_copy = _sameas_corresponding_descendant(tail_copy, tail_orig, last_orig)
+    if last_copy is not None:
+        _sameas_prune_after_within_top(tail_copy, last_copy)
+    # Synthetic parent: one walk so tails between siblings and inline TEI (``add``, ``note``, …) survive.
+    wrap = etree.Element("tuview-sameas-expand")
+    for ch in slice_copies:
+        wrap.append(ch)
+    merged_segments = diplomatic_segments(wrap, "note")
+    merged_segments = _merge_adjacent_text_segments(merged_segments)
+    merged_segments = [
+        s
+        for s in merged_segments
+        if not (s.get("kind") == "text" and (s.get("text") or "") == "")
+    ]
+    new_text = plain_text_from_rich_segments(merged_segments)
+    if not new_text.strip():
+        return segments, text, xml
+    # Tight serialization (no pretty_print): avoids newlines between ``<s/>`` and the following slice
+    # that some HTML contexts treat as inter-word space.
+    new_xml = etree.tostring(elem, encoding="unicode", pretty_print=False).strip() + "".join(
+        etree.tostring(ch, encoding="unicode", pretty_print=False) for ch in slice_copies
+    )
+    return merged_segments, new_text, new_xml
+
+
 def iter_aligned_units_for_level(path: Path, level: str) -> list[dict[str, Any]]:
     """Return aligned units at ``level`` (elements with ``@tuid``), document order."""
     tag = level_to_local_tag(level)
@@ -199,12 +413,14 @@ def iter_aligned_units_for_level(path: Path, level: str) -> list[dict[str, Any]]
         uid = _element_identity(elem)
         segments = diplomatic_segments(elem, "note")
         text = plain_text_from_rich_segments(segments)
+        xml = _serialize_aligned_element(elem)
+        segments, text, xml = _expand_sameas_if_empty_sentence(elem, segments, text, xml)
         row: dict[str, Any] = {
             "tuid": tuid,
             "id": uid,
             "text": text,
             "source_file": str(path),
-            "xml": _serialize_aligned_element(elem),
+            "xml": xml,
             "segments": segments,
         }
         rows.append(row)

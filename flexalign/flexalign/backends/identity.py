@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..align.segment_adapter import segment_views_from_align_doc
 from ..backend_spec import BackendSpec, StepSpec
 
 
@@ -15,20 +16,25 @@ class IdentityBackend:
     )
 
     def align(self, src, tgt, *, step=None, parent_pairs=None, options=None):
-        src_by_id = {unit.unit_id: unit for unit in src.iter_units(step.level if step else "s") if unit.unit_id}
-        tgt_by_id = {unit.unit_id: unit for unit in tgt.iter_units(step.level if step else "s") if unit.unit_id}
+        level = step.level if step else "s"
+        src_views = segment_views_from_align_doc(src, level)
+        tgt_views = segment_views_from_align_doc(tgt, level)
+        src_by_id = {v.anchor_id: v for v in src_views if v.anchor_id}
+        tgt_by_id = {v.anchor_id: v for v in tgt_views if v.anchor_id}
         rows = []
         for unit_id in sorted(set(src_by_id).intersection(tgt_by_id)):
+            sv = src_by_id[unit_id]
+            tv = tgt_by_id[unit_id]
             rows.append(
                 {
                     "id1": [unit_id],
                     "id2": [unit_id],
-                    "text1": src_by_id[unit_id].text,
-                    "text2": tgt_by_id[unit_id].text,
+                    "text1": sv.text,
+                    "text2": tv.text,
                     "score": 1.0,
                     "edit": "auto",
-                    "tuid_at_write_1": src_by_id[unit_id].element.get("tuid"),
-                    "tuid_at_write_2": tgt_by_id[unit_id].element.get("tuid"),
+                    "tuid_at_write_1": sv.tuid,
+                    "tuid_at_write_2": tv.tuid,
                 }
             )
         return rows
