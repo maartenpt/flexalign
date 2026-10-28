@@ -355,6 +355,7 @@ def to_reconcile_payload(result: MergeResult, *, level: str = "s") -> Dict[str, 
     return {
         "documents": sorted({u[0] for u in result.ids}),
         "level": level,
+        "assignment": "complete",   # the whole level's ids: apply replaces, not adds
         "multivalue": result.multivalue,
         "tuids": tuids,
         "report": result.report,

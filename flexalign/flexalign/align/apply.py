@@ -240,21 +240,27 @@ def apply_reconciled_payload(
     out_dir: Path | None = None,
     mirror_root: Path | None = None,
     skip_unchanged: bool = True,
+    project_root: Path | None = None,
 ) -> dict[str, int]:
     """Apply all reconcile rows; batch updates per document (one read/write per file).
 
+    A unit in several rows gets all their tuids ('|'-joined). A payload marked `"assignment": "complete"` (a
+    `flexalign merge` result) replaces each listed unit's tuid; otherwise the tuids are added to what it has.
+    Relative document paths are resolved under `project_root` when given.
+
     Returns counts: files_written, files_unchanged, tokens_updated, tokens_new_tuid.
     """
-    pending: dict[str, dict[str, str]] = {}
+    replace = payload.get("assignment") == "complete"
+    pending: dict[str, dict[str, list[str]]] = {}
     for item in payload.get("tuids", []):
         tuid = item.get("tuid")
         if not tuid:
             continue
         for doc_path, ids in item.get("members", {}).items():
-            doc_key = str(Path(doc_path))
+            doc_key = str(_resolve_xml_path(doc_path, project_root) if project_root else Path(doc_path))
             slot = pending.setdefault(doc_key, {})
             for unit_id in ids:
-                slot[str(unit_id)] = str(tuid)
+                slot.setdefault(str(unit_id), []).append(str(tuid))
 
     stats = {"files_written": 0, "files_unchanged": 0, "tokens_updated": 0, "tokens_new_tuid": 0}
     for doc_path, assignments in pending.items():
@@ -264,12 +270,15 @@ def apply_reconciled_payload(
         tree = _load_tree(path)
         root = tree.getroot()
         changed = False
-        for unit_id, tuid in assignments.items():
+        for unit_id, tuids in assignments.items():
             node = _find_by_id(root, unit_id)
             if node is None:
                 continue
             before = (node.get("tuid") or "").strip()
-            _set_tuid(node, tuid)
+            if replace:
+                node.set("tuid", join_tuids(tuids))
+            else:
+                _set_tuid(node, join_tuids(tuids))
             after = (node.get("tuid") or "").strip()
             if before != after:
                 changed = True
@@ -298,7 +307,8 @@ def apply_from_path(
 ) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if "tuids" in payload:
-        apply_reconciled_payload(payload, out_dir=out_dir, mirror_root=mirror_root, skip_unchanged=False)
+        apply_reconciled_payload(payload, out_dir=out_dir, mirror_root=mirror_root, skip_unchanged=False,
+                                 project_root=project_root)
     else:
         if pivot_path is None:
             raise ValueError("--pivot is required for pair JSON apply")
