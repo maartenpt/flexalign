@@ -10,6 +10,7 @@ from pathlib import Path
 
 def main(argv: list[str] | None = None) -> int:
     from .align.tuid_merge import POLICIES, from_reconcile_payload, merge_bitexts, to_reconcile_payload
+    from .io.pair_json import read_pair_bitext
     from .io.xces import iter_xces
 
     parser = argparse.ArgumentParser(
@@ -18,6 +19,9 @@ def main(argv: list[str] | None = None) -> int:
                     "as short as the alignments allow (one id per unit wherever possible).")
     parser.add_argument("--xces", nargs="+", default=[], metavar="FILE",
                         help="XCES alignment files (OPUS cesAlign, gzipped or not); each linkGrp is a bitext")
+    parser.add_argument("--pairs", nargs="+", default=[], metavar="FILE",
+                        help="flexalign pair JSON files (`flexalign align` output, e.g. token pairs); documents "
+                             "named relative to --doc-root")
     parser.add_argument("--level", default="s", help="the level the ids are for (default: s)")
     parser.add_argument("--policy", choices=POLICIES, default="pivot",
                         help="pivot: documents without a bitext between them may be aligned through others "
@@ -29,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="copies of one document to unify first: {canonical name: [copy, …]}, names as the "
                              "bitexts use them (OPUS: the pivot document's copy per language pair)")
     parser.add_argument("--doc-root", type=Path, default=Path("."),
-                        help="where the documents named in the bitexts are (for --unify; default: .)")
+                        help="where the documents named in the bitexts are (for --unify and --pairs; default: .)")
     parser.add_argument("--text-fallback", action="store_true",
                         help="--unify: match units by identical text in document order where the ids do not "
                              "(renumbered copies)")
@@ -41,8 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv[1:] if argv and argv[0] == "merge" else argv)
 
     bitexts = [bt for path in args.xces for bt in iter_xces(path)]
+    bitexts += [read_pair_bitext(path, doc_root=args.doc_root) for path in args.pairs]
     if not bitexts:
-        parser.error("no bitexts: give --xces FILE …")
+        parser.error("no bitexts: give --xces FILE … or --pairs FILE …")
     unification = None
     if args.unify:
         from .align.unify import rewrite_bitexts, unify_copies

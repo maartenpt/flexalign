@@ -12,7 +12,7 @@ Discovery: built-in modules under `flexalign.backends` export **`BACKEND_SPEC`**
 | **attribute** | Match on a configurable XML attribute (`--attr`, default `n`), with optional verse-style normalization. |
 | **hunalign** | Scaffold: currently delegates to **identity**. |
 | **labse** | Scaffold: delegates to **identity**; optional extras documented under [`install`](Command-install.md). |
-| **awesome** | Neural token alignment at **`tok`** (sentence-grouped); non-`tok` levels delegate to **identity**. Requires `[awesome]` extras. |
+| **awesome** | Token pairs at **`tok`** within sentences sharing a sentence tuid; non-`tok` levels delegate to **identity**. Method `awesome` (default): awesome-align's extraction (model `aneuraz/awesome-align-with-co`, layer 8, softmax threshold 1e-3; n:m pairs). Method `similarity`: mutual nearest neighbours of frequency-weighted vectors from a small sentence encoder. Options via `--backend-option`. Requires `[awesome]` extras. |
 
 List names at runtime:
 

@@ -1,4 +1,10 @@
-"""Awesome-align inspired backend."""
+"""awesome backend: token pairs within sentences that share a sentence tuid.
+
+Methods (option `method`):
+  awesome     awesome-align's extraction (awesome_align.py; options `model`, `layer`, `threshold`); the default
+  similarity  mutual nearest neighbours of frequency-weighted word vectors from a small sentence encoder
+              (option `threshold`, default 0.4)
+"""
 
 from __future__ import annotations
 
@@ -216,25 +222,42 @@ class AwesomeBackend:
 
             return IdentityBackend().align(src, tgt, step=step, parent_pairs=parent_pairs, options=options)
 
-        threshold = float(options.get("threshold", 0.4))
+        method = str(options.get("method", "awesome"))
+        if method not in ("awesome", "similarity"):
+            raise ValueError(f"awesome backend: unknown method {method!r} (awesome, similarity)")
         src_by_sentence = self._collect_tokens(src)
         tgt_by_sentence = self._collect_tokens(tgt)
-        src_freq = self._build_frequency(src_by_sentence)
-        tgt_freq = self._build_frequency(tgt_by_sentence)
+        if method == "awesome":
+            from .awesome_align import DEFAULT_LAYER, DEFAULT_MODEL, DEFAULT_THRESHOLD, AwesomeAligner
+
+            aligner = AwesomeAligner(str(options.get("model", DEFAULT_MODEL)),
+                                     layer=int(options.get("layer", DEFAULT_LAYER)),
+                                     threshold=float(options.get("threshold", DEFAULT_THRESHOLD)))
+            basis = "awesome:softmax-intersection"
+
+            def sentence_pairs(src_tokens, tgt_tokens):
+                found = aligner.word_pairs([t.text for t in src_tokens], [t.text for t in tgt_tokens])
+                return [(i, j, 1.0) for i, j in sorted(found)]
+        else:
+            threshold = float(options.get("threshold", 0.4))
+            src_freq = self._build_frequency(src_by_sentence)
+            tgt_freq = self._build_frequency(tgt_by_sentence)
+            basis = "awesome:mutual-nearest-weighted"
+
+            def sentence_pairs(src_tokens, tgt_tokens):
+                return self._align_sentence_tokens(src_tokens, tgt_tokens, src_freq=src_freq, tgt_freq=tgt_freq,
+                                                   threshold=threshold)
         rows = []
+        seen = set()
         for sentence_key in sorted(set(src_by_sentence).intersection(tgt_by_sentence)):
             src_tokens = src_by_sentence[sentence_key]
             tgt_tokens = tgt_by_sentence[sentence_key]
-            pairs = self._align_sentence_tokens(
-                src_tokens,
-                tgt_tokens,
-                src_freq=src_freq,
-                tgt_freq=tgt_freq,
-                threshold=threshold,
-            )
-            for i, j, score in pairs:
+            for i, j, score in sentence_pairs(src_tokens, tgt_tokens):
                 source = src_tokens[i]
                 target = tgt_tokens[j]
+                if (source.unit_id, target.unit_id) in seen:   # a sentence with several tuids is in several groups
+                    continue
+                seen.add((source.unit_id, target.unit_id))
                 rows.append(
                     {
                         "id1": [source.unit_id],
@@ -243,7 +266,7 @@ class AwesomeBackend:
                         "text2": target.text,
                         "score": round(score, 6),
                         "edit": "auto",
-                        "alignment_basis": "awesome:mutual-nearest-weighted",
+                        "alignment_basis": basis,
                         "tuid_at_write_1": source.tuid,
                         "tuid_at_write_2": target.tuid,
                     }
@@ -253,7 +276,7 @@ class AwesomeBackend:
 
 BACKEND_SPEC = BackendSpec(
     name="awesome",
-    description="Awesome-align wrapper with rollup support",
+    description="Token pairs within aligned sentences (awesome-align; or a similarity method)",
     factory=AwesomeBackend,
     supported_steps=AwesomeBackend.supported_steps,
     install_instructions='Install extras with: pip install "flexalign[awesome]"',

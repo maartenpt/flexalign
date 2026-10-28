@@ -26,6 +26,7 @@ flexalign align --set myAlignmentSetUid --project-root /path/to/teitok/project -
 | `--level` | Alignment level (e.g. `s`, `tok`; see [Concepts](Concepts.md)). |
 | `--backend` | Backend name (`identity`, `attribute`, `awesome`, …). |
 | `--attr` | For **attribute** backend: XML attribute to match on (default `xml:id`). |
+| `--backend-option` | `KEY=VALUE` for the backend, repeatable. **awesome**: `method` (`awesome`, default; or `similarity`), `model`, `layer`, `threshold`. |
 | `--project-from-level` | Before aligning, run [`segment-from-pivot`](Command-segment-from-pivot.md) for each level from this value through `--level` (only `s` → `tok` chain is wired in CLI). |
 
 ## See also

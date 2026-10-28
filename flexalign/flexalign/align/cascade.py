@@ -28,7 +28,8 @@ def _parse_backend_map(spec: str) -> dict[str, tuple[str, str]]:
     return mapping
 
 
-def align_single(*, backend: str, level: str, pivot_path: str, target_path: str, attr: str = "xml:id") -> dict:
+def align_single(*, backend: str, level: str, pivot_path: str, target_path: str, attr: str = "xml:id",
+                 options: dict | None = None) -> dict:
     from ..backends.attribute import AttributeBackend
     from ..backends.identity import IdentityBackend
 
@@ -43,7 +44,7 @@ def align_single(*, backend: str, level: str, pivot_path: str, target_path: str,
         spec = get_backend(backend)
         if spec is None:
             raise ValueError(f"Unknown backend: {backend}")
-        rows = spec.factory().align(src, tgt, step=step, parent_pairs=[], options={})
+        rows = spec.factory().align(src, tgt, step=step, parent_pairs=[], options=dict(options or {}))
     rows = sorted(rows, key=lambda row: (tuple(row.get("id1", [])), tuple(row.get("id2", []))))
     method_detail = backend
     if backend == "attribute":

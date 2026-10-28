@@ -44,6 +44,8 @@ def _build_parser() -> argparse.ArgumentParser:
     align.add_argument("--level", default="s")
     align.add_argument("--pivot", nargs=2)
     align.add_argument("--set", dest="set_id")
+    align.add_argument("--backend-option", action="append", default=[], metavar="KEY=VALUE",
+                       help="an option for the backend, repeatable (awesome: method, model, layer, threshold)")
     align.add_argument("--pivot-mode", choices=["first", "all"], default="first")
     align.add_argument("--project-root")
     align.add_argument("--output", required=True)
@@ -386,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
                 pivot_path=pivot_path,
                 target_path=target_path,
                 attr=args.attr,
+                options=dict(kv.split("=", 1) for kv in args.backend_option),
             )
             if len(pairs) == 1:
                 destination = output_path
