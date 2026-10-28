@@ -95,6 +95,17 @@ def _expected_tuids_from_pair_payload(pair_payload: dict) -> set[str]:
     return expected
 
 
+def _mirror_out_path(source: Path, out_dir: Path, *, mirror_root: Path | None = None) -> Path:
+    """Map *source* under *out_dir*, preserving layout relative to *mirror_root* when possible."""
+    resolved = source.resolve()
+    if mirror_root is not None:
+        try:
+            return out_dir / resolved.relative_to(mirror_root.resolve())
+        except ValueError:
+            pass
+    return out_dir / resolved.name
+
+
 def _resolve_xml_path(raw: str | Path, project_root: Path) -> Path:
     """Resolve pivot/target paths from pair JSON; relative paths are under project_root."""
     p = Path(raw)
@@ -129,6 +140,7 @@ def apply_pair_payload(
     pivot_path: Path,
     project_root: Path | None = None,
     out_dir: Path | None = None,
+    mirror_root: Path | None = None,
     ignore_tuid_drift: bool = False,
     invalidate_below: bool = False,
     mark_needs_review: bool = False,
@@ -187,26 +199,90 @@ def apply_pair_payload(
         mark_needs_review=mark_needs_review,
     )
 
-    destination = (out_dir / target_path.name) if out_dir else target_path
+    destination = _mirror_out_path(target_path, out_dir, mirror_root=mirror_root) if out_dir else target_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     # TEITOK and similar pipelines store whitespace-sensitive XML; avoid pretty-print reformatting the whole file.
     destination.write_bytes(etree.tostring(target_tree, pretty_print=False, xml_declaration=True, encoding="utf-8"))
 
 
-def apply_reconciled_payload(payload: dict, *, out_dir: Path | None = None) -> None:
+def _split_xml_declaration(raw: bytes) -> tuple[bytes | None, bytes]:
+    """Return (declaration bytes including ?>, rest of file)."""
+    if not raw.startswith(b"<?xml"):
+        return None, raw
+    end = raw.find(b"?>")
+    if end == -1:
+        return None, raw
+    decl = raw[: end + 2]
+    rest = raw[end + 2 :]
+    if rest.startswith(b"\n"):
+        rest = rest[1:]
+    elif rest.startswith(b"\r\n"):
+        rest = rest[2:]
+    return decl, rest
+
+
+def _write_tree_preserving_decl(path: Path, tree: etree._ElementTree, *, destination: Path) -> None:
+    """Serialize TEI without altering the source XML declaration line when possible."""
+    original = path.read_bytes()
+    decl, _ = _split_xml_declaration(original)
+    content = etree.tostring(tree, pretty_print=False, xml_declaration=False, encoding="utf-8")
+    if decl is not None:
+        payload = decl + b"\n" + content
+    else:
+        payload = etree.tostring(tree, pretty_print=False, xml_declaration=True, encoding="utf-8")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+
+
+def apply_reconciled_payload(
+    payload: dict,
+    *,
+    out_dir: Path | None = None,
+    mirror_root: Path | None = None,
+    skip_unchanged: bool = True,
+) -> dict[str, int]:
+    """Apply all reconcile rows; batch updates per document (one read/write per file).
+
+    Returns counts: files_written, files_unchanged, tokens_updated, tokens_new_tuid.
+    """
+    pending: dict[str, dict[str, str]] = {}
     for item in payload.get("tuids", []):
         tuid = item.get("tuid")
+        if not tuid:
+            continue
         for doc_path, ids in item.get("members", {}).items():
-            path = Path(doc_path)
-            tree = _load_tree(path)
-            root = tree.getroot()
+            doc_key = str(Path(doc_path))
+            slot = pending.setdefault(doc_key, {})
             for unit_id in ids:
-                node = _find_by_id(root, unit_id)
-                if node is not None:
-                    _set_tuid(node, tuid)
-            destination = (out_dir / path.name) if out_dir else path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(etree.tostring(tree, pretty_print=False, xml_declaration=True, encoding="utf-8"))
+                slot[str(unit_id)] = str(tuid)
+
+    stats = {"files_written": 0, "files_unchanged": 0, "tokens_updated": 0, "tokens_new_tuid": 0}
+    for doc_path, assignments in pending.items():
+        path = Path(doc_path)
+        if not path.exists():
+            continue
+        tree = _load_tree(path)
+        root = tree.getroot()
+        changed = False
+        for unit_id, tuid in assignments.items():
+            node = _find_by_id(root, unit_id)
+            if node is None:
+                continue
+            before = (node.get("tuid") or "").strip()
+            _set_tuid(node, tuid)
+            after = (node.get("tuid") or "").strip()
+            if before != after:
+                changed = True
+                stats["tokens_updated"] += 1
+                if not before:
+                    stats["tokens_new_tuid"] += 1
+        destination = _mirror_out_path(path, out_dir, mirror_root=mirror_root) if out_dir else path
+        if skip_unchanged and not changed:
+            stats["files_unchanged"] += 1
+            continue
+        _write_tree_preserving_decl(path, tree, destination=destination)
+        stats["files_written"] += 1
+    return stats
 
 
 def apply_from_path(
@@ -214,6 +290,7 @@ def apply_from_path(
     path: Path,
     pivot_path: Path | None = None,
     out_dir: Path | None = None,
+    mirror_root: Path | None = None,
     project_root: Path | None = None,
     ignore_tuid_drift: bool = False,
     invalidate_below: bool = False,
@@ -221,7 +298,7 @@ def apply_from_path(
 ) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if "tuids" in payload:
-        apply_reconciled_payload(payload, out_dir=out_dir)
+        apply_reconciled_payload(payload, out_dir=out_dir, mirror_root=mirror_root, skip_unchanged=False)
     else:
         if pivot_path is None:
             raise ValueError("--pivot is required for pair JSON apply")
@@ -230,6 +307,7 @@ def apply_from_path(
             pivot_path=pivot_path,
             project_root=project_root,
             out_dir=out_dir,
+            mirror_root=mirror_root,
             ignore_tuid_drift=ignore_tuid_drift,
             invalidate_below=invalidate_below,
             mark_needs_review=mark_needs_review,
@@ -241,6 +319,7 @@ def apply_pair_tok_refs(
     *,
     project_root: Path | None = None,
     out_dir: Path | None = None,
+    mirror_root: Path | None = None,
     attr_name: str = "tok",
     reset_target_tok_attr: bool = False,
 ) -> tuple[int, int]:
@@ -282,7 +361,7 @@ def apply_pair_tok_refs(
             f"({target_path})."
         )
 
-    destination = (out_dir / target_path.name) if out_dir else target_path
+    destination = _mirror_out_path(target_path, out_dir, mirror_root=mirror_root) if out_dir else target_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(etree.tostring(target_tree, pretty_print=False, xml_declaration=True, encoding="utf-8"))
     return id2_slots, target_writes
@@ -293,6 +372,7 @@ def apply_tok_refs_from_path(
     path: Path,
     project_root: Path | None = None,
     out_dir: Path | None = None,
+    mirror_root: Path | None = None,
     attr_name: str = "tok",
     reset_target_tok_attr: bool = False,
 ) -> tuple[int, int]:
@@ -301,6 +381,7 @@ def apply_tok_refs_from_path(
         payload,
         project_root=project_root,
         out_dir=out_dir,
+        mirror_root=mirror_root,
         attr_name=attr_name,
         reset_target_tok_attr=reset_target_tok_attr,
     )

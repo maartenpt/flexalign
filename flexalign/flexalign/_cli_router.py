@@ -25,6 +25,10 @@ def run(argv: list[str] | None = None) -> int:
         from ._cli_install import main
 
         return main(args)
+    if subcommand == "merge":
+        from ._cli_merge import main
+
+        return main(args)
     if subcommand == "job":
         from ._cli_job import main
 

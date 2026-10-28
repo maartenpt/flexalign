@@ -10,6 +10,7 @@ TASK_CHOICES = (
     "convert",
     "plain",
     "reconcile",
+    "merge",
     "apply",
     "apply-tok-refs",
     "info",
