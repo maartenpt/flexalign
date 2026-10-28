@@ -25,6 +25,20 @@ def _find_by_id(root: etree._Element, unit_id: str) -> etree._Element | None:
     return results[0] if results else None
 
 
+def _id_index(root: etree._Element) -> dict[str, etree._Element]:
+    """id → element, as _find_by_id finds it (the first element whose xml:id, id or tuid is it), built once: one
+    XPath search per unit makes applying to a large document quadratic."""
+    index: dict[str, etree._Element] = {}
+    xml_id = "{http://www.w3.org/XML/1998/namespace}id"
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        for key in (el.get(xml_id), el.get("id"), el.get("tuid")):
+            if key and key not in index:
+                index[key] = el
+    return index
+
+
 def _get_tuid(elem: etree._Element | None) -> str | None:
     if elem is None:
         return None
@@ -269,9 +283,10 @@ def apply_reconciled_payload(
             continue
         tree = _load_tree(path)
         root = tree.getroot()
+        index = _id_index(root)
         changed = False
         for unit_id, tuids in assignments.items():
-            node = _find_by_id(root, unit_id)
+            node = index.get(unit_id)
             if node is None:
                 continue
             before = (node.get("tuid") or "").strip()
