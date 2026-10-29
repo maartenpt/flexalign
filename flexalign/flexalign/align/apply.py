@@ -7,6 +7,7 @@ from pathlib import Path
 
 from lxml import etree
 
+from .. import progress
 from .tuid import join_tuids, mint_tuid, parse_tuid
 
 XML_NS = "{http://www.w3.org/XML/1998/namespace}"
@@ -277,7 +278,7 @@ def apply_reconciled_payload(
                 slot.setdefault(str(unit_id), []).append(str(tuid))
 
     stats = {"files_written": 0, "files_unchanged": 0, "tokens_updated": 0, "tokens_new_tuid": 0}
-    for doc_path, assignments in pending.items():
+    for doc_path, assignments in progress.track(list(pending.items()), "apply", name=lambda d: Path(d[0]).name):
         path = Path(doc_path)
         if not path.exists():
             continue

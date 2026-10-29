@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from .bitext import Bitext, Unit
 
@@ -42,7 +42,7 @@ class MergeResult:
 class _Constraints:
     """What the bitexts say about a pair of units."""
 
-    def __init__(self, bitexts: List[Bitext]) -> None:
+    def __init__(self, bitexts: List[Bitext], on_bitext: Optional[Callable[[], None]] = None) -> None:
         self.bead_of: List[Dict[Unit, int]] = []                     # per bitext: unit → bead index
         self.between: Dict[FrozenSet[str], List[int]] = defaultdict(list)
         self.required: Set[Tuple[Unit, Unit]] = set()
@@ -60,6 +60,8 @@ class _Constraints:
                         self.required.add(_pair((bt.doc_a, x), (bt.doc_b, y)))
             self.bead_of.append(beads)
             self.between[frozenset((bt.doc_a, bt.doc_b))].append(k)
+            if on_bitext:
+                on_bitext()
 
     def forbidden(self, u: Unit, v: Unit) -> bool:
         if u[0] == v[0]:
@@ -253,13 +255,32 @@ def _name(groups: List[List[Unit]], prefix: str, previous: Optional[Dict[Unit, L
     return [n for n in names if n is not None]
 
 
+class _Silent:
+    """A progress that shows nothing (merge_bitexts without `progress`)."""
+
+    def __init__(self, *_args, **_kw) -> None:
+        pass
+
+    def step(self, *_args, **_kw) -> None:
+        pass
+
+    def __enter__(self) -> "_Silent":
+        return self
+
+    def __exit__(self, *_) -> None:
+        pass
+
+
 def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str = "t",
-                  previous: Optional[Dict[Unit, List[str]]] = None) -> MergeResult:
-    """One tuid system for all the bitexts (see the module docstring)."""
+                  previous: Optional[Dict[Unit, List[str]]] = None, progress: Optional[Callable] = None) -> MergeResult:
+    """One tuid system for all the bitexts (see the module docstring). `progress(label, total)`: a context manager
+    with `step()` per item of each phase (flexalign.progress.Progress)."""
     if policy not in POLICIES:
         raise ValueError(f"policy: one of {', '.join(POLICIES)}")
+    phase = progress or _Silent
     exact = policy == "exact"
-    cons = _Constraints(bitexts)
+    with phase("constraints", len(bitexts)) as p:
+        cons = _Constraints(bitexts, on_bitext=p.step)
     contradictions = sorted(p for p in cons.required if cons.forbidden(*p))
     required = cons.required - set(contradictions)
 
@@ -282,14 +303,16 @@ def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str =
 
     groups: List[List[Unit]] = []
     conflicting = 0
-    for root in sorted(comps):
-        comp = comps[root]
-        if _clean(comp, cons, exact):
-            groups.append(comp)
-            continue
-        conflicting += 1
-        groups.extend(sorted(sorted(c) for c in _cover(set(comp), req_by_root[root], beads_by_root[root], cons,
-                                                       exact)))
+    with phase("components", len(comps)) as p:
+        for root in sorted(comps):
+            p.step()
+            comp = comps[root]
+            if _clean(comp, cons, exact):
+                groups.append(comp)
+                continue
+            conflicting += 1
+            groups.extend(sorted(sorted(c) for c in _cover(set(comp), req_by_root[root], beads_by_root[root], cons,
+                                                           exact)))
 
     names = _name(groups, prefix, previous)
     ids: Dict[Unit, List[str]] = defaultdict(list)
@@ -299,7 +322,8 @@ def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str =
         for u in g:
             ids[u].append(name)
 
-    report = verify(bitexts, ids, policy=policy)
+    with phase("verify", len(members)) as p:
+        report = verify(bitexts, ids, policy=policy, cons=cons, on_id=p.step)
     report.update({
         "policy": policy,
         "bitexts": len(bitexts),
@@ -318,10 +342,12 @@ def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str =
     return MergeResult(ids=dict(ids), members=members, report=report)
 
 
-def verify(bitexts: List[Bitext], ids: Dict[Unit, List[str]], *, policy: str = "pivot") -> Dict[str, object]:
+def verify(bitexts: List[Bitext], ids: Dict[Unit, List[str]], *, policy: str = "pivot",
+           cons: Optional[_Constraints] = None, on_id: Optional[Callable[[], None]] = None) -> Dict[str, object]:
     """Check an assignment against the bitexts: required pairs share an id, forbidden pairs (and, under `exact`,
-    pairs no bitext covers) do not. Contradicted pairs (required by one bitext, forbidden by another) are left out."""
-    cons = _Constraints(bitexts)
+    pairs no bitext covers) do not. Contradicted pairs (required by one bitext, forbidden by another) are left out.
+    `cons`: the bitexts' constraints when already built; `on_id`: called after each id is checked (progress)."""
+    cons = cons or _Constraints(bitexts)
     exact = policy == "exact"
     shared = lambda u, v: bool(set(ids.get(u, ())) & set(ids.get(v, ())))   # noqa: E731
     missing = [p for p in cons.required if not cons.forbidden(*p) and not shared(*p)]
@@ -331,6 +357,8 @@ def verify(bitexts: List[Bitext], ids: Dict[Unit, List[str]], *, policy: str = "
             members[t].append(u)
     wrong, inferred = set(), set()
     for us in members.values():
+        if on_id:
+            on_id()
         us = sorted(us)
         for i, u in enumerate(us):
             for v in us[i + 1:]:

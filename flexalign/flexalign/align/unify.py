@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .bitext import Bead, Bitext, Unit
 
@@ -51,11 +51,14 @@ class Unification:
 
 
 def unify_copies(groups: Dict[str, Sequence[str]], texts: Dict[str, List[Tuple[str, str]]], *,
-                 text_fallback: bool = False, min_overlap: float = 0.5) -> Unification:
+                 text_fallback: bool = False, min_overlap: float = 0.5,
+                 on_group: Optional[Callable[[], None]] = None) -> Unification:
     """`groups`: canonical document name → its copies (document names as the bitexts use them); `texts`: per copy,
-    its units in order as (id, text)."""
+    its units in order as (id, text). `on_group`: called after each group (progress)."""
     out = Unification()
     for canonical, copies in groups.items():
+        if on_group:
+            on_group()
         copies = [c for c in copies if c in texts]
         if not copies:
             continue

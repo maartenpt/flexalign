@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 
@@ -12,6 +13,8 @@ def main(argv: list[str] | None = None) -> int:
     from .align.tuid_merge import POLICIES, from_reconcile_payload, merge_bitexts, to_reconcile_payload
     from .io.pair_json import read_pair_bitext
     from .io.xces import iter_xces
+    from . import progress
+    from .progress import Progress, duration, track
 
     parser = argparse.ArgumentParser(
         prog="flexalign merge", allow_abbrev=False,
@@ -31,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="an earlier merge result: ids keep their names where their members survive")
     parser.add_argument("--unify", type=Path, metavar="GROUPS_JSON",
                         help="copies of one document to unify first: {canonical name: [copy, …]}, names as the "
-                             "bitexts use them (OPUS: the pivot document's copy per language pair)")
+                             "bitexts use them (OPUS: the pivot document's copy per language pair); a document listed as its "
+                             "own only copy is left as it is")
     parser.add_argument("--doc-root", type=Path, default=Path("."),
                         help="where the documents named in the bitexts are (for --unify and --pairs; default: .)")
     parser.add_argument("--text-fallback", action="store_true",
@@ -44,8 +48,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="the result in the reconcile format (tuids_<level>.json), with a report")
     args = parser.parse_args(argv[1:] if argv and argv[0] == "merge" else argv)
 
-    bitexts = [bt for path in args.xces for bt in iter_xces(path)]
-    bitexts += [read_pair_bitext(path, doc_root=args.doc_root) for path in args.pairs]
+    started = time.time()
+    bitexts = [bt for path in track(args.xces, "read alignments", name=lambda p: Path(p).name)
+               for bt in iter_xces(path)]
+    if args.pairs:
+        bitexts += [read_pair_bitext(path, doc_root=args.doc_root)
+                    for path in track(args.pairs, "read pairs", name=lambda p: Path(p).name)]
     if not bitexts:
         parser.error("no bitexts: give --xces FILE … or --pairs FILE …")
     unification = None
@@ -54,19 +62,22 @@ def main(argv: list[str] | None = None) -> int:
         from .io.unit_texts import read_unit_texts
 
         groups = json.loads(args.unify.read_text(encoding="utf-8"))
+        # a document that is its own only copy has nothing to unify: not read (Europarl: all of them)
+        groups = {c: copies for c, copies in groups.items() if list(copies) != [c]}
         texts = {}
-        for copies in groups.values():
-            for doc in copies:
-                path = args.doc_root / doc
-                if not path.exists() and (args.doc_root / (doc + ".gz")).exists():
-                    path = args.doc_root / (doc + ".gz")
-                texts[doc] = read_unit_texts(path, level=args.level)
-        unification = unify_copies(groups, texts, text_fallback=args.text_fallback, min_overlap=args.min_overlap)
+        for doc in track([d for copies in groups.values() for d in copies], "read documents", name=str):
+            path = args.doc_root / doc
+            if not path.exists() and (args.doc_root / (doc + ".gz")).exists():
+                path = args.doc_root / (doc + ".gz")
+            texts[doc] = read_unit_texts(path, level=args.level)
+        with Progress("unify copies", len(groups)) as p:
+            unification = unify_copies(groups, texts, text_fallback=args.text_fallback,
+                                       min_overlap=args.min_overlap, on_group=p.step)
         bitexts = rewrite_bitexts(bitexts, unification)
     previous = None
     if args.previous:
         previous = from_reconcile_payload(json.loads(args.previous.read_text(encoding="utf-8")))
-    result = merge_bitexts(bitexts, policy=args.policy, prefix=args.prefix, previous=previous)
+    result = merge_bitexts(bitexts, policy=args.policy, prefix=args.prefix, previous=previous, progress=Progress)
     payload = to_reconcile_payload(result, level=args.level)
     if unification is not None:
         payload["unify"] = {
@@ -75,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
                        for doc, extras in unification.extras.items()},
         }
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    if progress.enabled:
+        print(f"  merge done in {duration(time.time() - started)}", file=sys.stderr)
 
     r = result.report
     print(f"{r['bitexts']} bitexts over {r['documents']} documents: {r['aligned_units']} aligned units, "
