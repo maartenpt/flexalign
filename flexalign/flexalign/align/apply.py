@@ -267,12 +267,17 @@ def apply_reconciled_payload(
     """
     replace = payload.get("assignment") == "complete"
     pending: dict[str, dict[str, list[str]]] = {}
-    for item in payload.get("tuids", []):
+    keys: dict[str, str] = {}   # each document's path resolved once (resolve() stats every folder on the way)
+    items = payload.get("tuids", [])
+    for item in progress.track(items, "group by document"):
         tuid = item.get("tuid")
         if not tuid:
             continue
         for doc_path, ids in item.get("members", {}).items():
-            doc_key = str(_resolve_xml_path(doc_path, project_root) if project_root else Path(doc_path))
+            doc_key = keys.get(doc_path)
+            if doc_key is None:
+                doc_key = keys[doc_path] = str(_resolve_xml_path(doc_path, project_root) if project_root
+                                               else Path(doc_path))
             slot = pending.setdefault(doc_key, {})
             for unit_id in ids:
                 slot.setdefault(str(unit_id), []).append(str(tuid))
@@ -321,7 +326,8 @@ def apply_from_path(
     invalidate_below: bool = False,
     mark_needs_review: bool = False,
 ) -> None:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    with progress.Progress(f"read {path.name}"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
     if "tuids" in payload:
         apply_reconciled_payload(payload, out_dir=out_dir, mirror_root=mirror_root, skip_unchanged=False,
                                  project_root=project_root)
