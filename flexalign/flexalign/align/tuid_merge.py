@@ -281,36 +281,59 @@ def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str =
     exact = policy == "exact"
     with phase("constraints", len(bitexts)) as p:
         cons = _Constraints(bitexts, on_bitext=p.step)
-    contradictions = sorted(p for p in cons.required if cons.forbidden(*p))
-    required = cons.required - set(contradictions)
+    with phase("contradictions", len(cons.required)) as p:
+        found = []
+        for pair in cons.required:
+            p.step()
+            if cons.forbidden(*pair):
+                found.append(pair)
+    contradictions = sorted(found)
+    required = cons.required - set(contradictions) if contradictions else cons.required
 
     uf = _UnionFind()
-    for u, v in sorted(required):
-        uf.union(u, v)
+    with phase("connect", len(required)) as p:
+        for u, v in required:   # any order: a component's root is always its smallest unit
+            p.step()
+            uf.union(u, v)
     comps: Dict[Unit, List[Unit]] = defaultdict(list)
-    for u in sorted(uf.parent):
-        comps[uf.find(u)].append(u)
-    # per component: its required pairs and beads (only the conflicting ones read them)
+    with phase("components", len(uf.parent)) as p:
+        for u in sorted(uf.parent):
+            p.step()
+            comps[uf.find(u)].append(u)
+    with phase("clean components", len(comps)) as p:
+        clean = {}
+        for root, comp in comps.items():
+            p.step()
+            clean[root] = _clean(comp, cons, exact)
+    conflicting = {root for root, ok in clean.items() if not ok}
+    # the conflicting components' required pairs and beads (only they read them)
     req_by_root: Dict[Unit, Set[Tuple[Unit, Unit]]] = defaultdict(set)
-    for p in required:
-        req_by_root[uf.find(p[0])].add(p)
     beads_by_root: Dict[Unit, List[_BeadUnits]] = defaultdict(list)
-    for bt in bitexts:
-        for bead in bt.beads:
-            first = (bt.doc_a, bead.a[0]) if bead.a else None
-            if bead.b and first in uf.parent:
-                beads_by_root[uf.find(first)].append((bt.doc_a, bead.a, bt.doc_b, bead.b))
+    if conflicting:
+        with phase("conflicting pairs", len(required)) as p:
+            for pair in required:
+                p.step()
+                root = uf.find(pair[0])
+                if root in conflicting:
+                    req_by_root[root].add(pair)
+        with phase("conflicting beads", len(bitexts)) as p:
+            for bt in bitexts:
+                p.step()
+                for bead in bt.beads:
+                    first = (bt.doc_a, bead.a[0]) if bead.a else None
+                    if bead.b and first in uf.parent:
+                        root = uf.find(first)
+                        if root in conflicting:
+                            beads_by_root[root].append((bt.doc_a, bead.a, bt.doc_b, bead.b))
 
     groups: List[List[Unit]] = []
-    conflicting = 0
-    with phase("components", len(comps)) as p:
+    with phase("cover conflicting", len(conflicting)) as p:
         for root in sorted(comps):
-            p.step()
             comp = comps[root]
-            if _clean(comp, cons, exact):
+            if clean[root]:
                 groups.append(comp)
                 continue
-            conflicting += 1
+            p.step()
             groups.extend(sorted(sorted(c) for c in _cover(set(comp), req_by_root[root], beads_by_root[root], cons,
                                                            exact)))
 
@@ -322,15 +345,14 @@ def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str =
         for u in g:
             ids[u].append(name)
 
-    with phase("verify", len(members)) as p:
-        report = verify(bitexts, ids, policy=policy, cons=cons, on_id=p.step)
+    report = verify(bitexts, ids, policy=policy, cons=cons, progress=phase)
     report.update({
         "policy": policy,
         "bitexts": len(bitexts),
         "documents": len({d for bt in bitexts for d in (bt.doc_a, bt.doc_b)}),
         "aligned_units": len(ids),
         "components": len(comps),
-        "conflicting_components": conflicting,
+        "conflicting_components": len(conflicting),
         "ids": len(members),
         "units_with_several_ids": sum(1 for v in ids.values() if len(v) > 1),
         "longest_list": max((len(v) for v in ids.values()), default=0),
@@ -343,31 +365,37 @@ def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str =
 
 
 def verify(bitexts: List[Bitext], ids: Dict[Unit, List[str]], *, policy: str = "pivot",
-           cons: Optional[_Constraints] = None, on_id: Optional[Callable[[], None]] = None) -> Dict[str, object]:
+           cons: Optional[_Constraints] = None, progress: Optional[Callable] = None) -> Dict[str, object]:
     """Check an assignment against the bitexts: required pairs share an id, forbidden pairs (and, under `exact`,
     pairs no bitext covers) do not. Contradicted pairs (required by one bitext, forbidden by another) are left out.
-    `cons`: the bitexts' constraints when already built; `on_id`: called after each id is checked (progress)."""
+    `cons`: the bitexts' constraints when already built; `progress` as in merge_bitexts."""
+    phase = progress or _Silent
     cons = cons or _Constraints(bitexts)
     exact = policy == "exact"
     shared = lambda u, v: bool(set(ids.get(u, ())) & set(ids.get(v, ())))   # noqa: E731
-    missing = [p for p in cons.required if not cons.forbidden(*p) and not shared(*p)]
+    with phase("verify pairs", len(cons.required)) as p:
+        missing = []
+        for pair in cons.required:
+            p.step()
+            if not shared(*pair) and not cons.forbidden(*pair):
+                missing.append(pair)
     members: Dict[str, List[Unit]] = defaultdict(list)
     for u, ts in ids.items():
         for t in ts:
             members[t].append(u)
     wrong, inferred = set(), set()
-    for us in members.values():
-        if on_id:
-            on_id()
-        us = sorted(us)
-        for i, u in enumerate(us):
-            for v in us[i + 1:]:
-                if u[0] == v[0]:
-                    continue
-                if cons.forbidden(u, v) or (exact and not cons.known(u, v)):
-                    wrong.add((u, v))
-                elif not cons.known(u, v):
-                    inferred.add((u, v))
+    with phase("verify ids", len(members)) as p:
+        for us in members.values():
+            p.step()
+            us = sorted(us)
+            for i, u in enumerate(us):
+                for v in us[i + 1:]:
+                    if u[0] == v[0]:
+                        continue
+                    if cons.forbidden(u, v) or (exact and not cons.known(u, v)):
+                        wrong.add((u, v))
+                    elif not cons.known(u, v):
+                        inferred.add((u, v))
     return {"ok": not missing and not wrong, "missing_pairs": len(missing), "forbidden_pairs": len(wrong),
             "inferred_pairs": len(inferred)}
 
