@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
 import time
@@ -10,7 +11,7 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .align.tuid_merge import POLICIES, from_reconcile_payload, merge_bitexts, to_reconcile_payload
+    from .align.tuid_merge import POLICIES, from_reconcile_payload, merge_bitexts, write_reconcile_payload
     from .io.pair_json import read_pair_bitext
     from .io.xces import iter_xces
     from . import progress
@@ -74,20 +75,25 @@ def main(argv: list[str] | None = None) -> int:
             unification = unify_copies(groups, texts, text_fallback=args.text_fallback,
                                        min_overlap=args.min_overlap, on_group=p.step)
         bitexts = rewrite_bitexts(bitexts, unification)
+    # what was read lives to the end: kept out of the garbage collector's passes, which on millions of objects
+    # cost minutes (more when memory is short); the merge itself makes no reference cycles
+    gc.freeze()
+    gc.disable()
     previous = None
     if args.previous:
         previous = from_reconcile_payload(json.loads(args.previous.read_text(encoding="utf-8")))
     result = merge_bitexts(bitexts, policy=args.policy, prefix=args.prefix, previous=previous, progress=Progress)
-    with Progress("result"):
-        payload = to_reconcile_payload(result, level=args.level)
+    with Progress("free the alignments read"):   # no longer needed: freed before the result is written
+        del bitexts
+    extra = {}
     if unification is not None:
-        payload["unify"] = {
+        extra["unify"] = {
             "documents": unification.report,
             "extras": {doc: [{"unit": e.unit[1], "from": list(e.source), "after": e.after} for e in extras]
                        for doc, extras in unification.extras.items()},
         }
-    with Progress(f"write {args.output.name}"):
-        args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    with Progress(f"write {args.output.name}", len(result.groups)) as p:
+        write_reconcile_payload(args.output, result, level=args.level, extra=extra, on_id=p.step)
     if progress.enabled:
         print(f"  merge done in {duration(time.time() - started)}", file=sys.stderr)
 

@@ -14,138 +14,104 @@ apart under `exact`.
 
 Ids are named `<prefix><n>` in document / unit order. Given a previous assignment, an id keeps its old name when
 its members largely survive (an incremental run rewrites only what changed).
+
+Inside, units are integers and the constraints flat arrays (align/tuid_units.py): Europarl-sized input fits in
+memory. The result stays in that form until asked for (`MergeResult.ids`, `members`) or written
+(`write_reconcile_payload`, id by id).
 """
 
 from __future__ import annotations
 
+import json
+from array import array
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
+from pathlib import Path
+from typing import IO, Callable, Dict, FrozenSet, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 from .bitext import Bitext, Unit
+from .tuid_units import Constraints, UnitIndex
 
 POLICIES = ("pivot", "exact")
 
 
-@dataclass
 class MergeResult:
-    ids: Dict[Unit, List[str]]               # unit → its ids (aligned units only)
-    members: Dict[str, List[Unit]]           # id → its units
-    report: Dict[str, object] = field(default_factory=dict)
+    """The ids: `groups[i]` (units, ascending) is id `names[i]`; per unit its first group in `first` (-1: not
+    aligned), further ones in `extra`."""
+
+    def __init__(self, index: UnitIndex, groups: List[List[int]], names: List[str], first: array,
+                 extra: Dict[int, List[int]], report: Optional[Dict[str, object]] = None) -> None:
+        self.index, self.groups, self.names, self.first, self.extra = index, groups, names, first, extra
+        self.report: Dict[str, object] = report or {}
+        self._ids: Optional[Dict[Unit, List[str]]] = None
+
+    @property
+    def ids(self) -> Dict[Unit, List[str]]:
+        """unit → its ids (aligned units only); built on first use."""
+        if self._ids is None:
+            ids: Dict[Unit, List[str]] = {}
+            for u, g in enumerate(self.first):
+                if g >= 0:
+                    ids[self.index.unit(u)] = [self.names[x] for x in (g, *self.extra.get(u, ()))]
+            self._ids = ids
+        return self._ids
+
+    @property
+    def members(self) -> Dict[str, List[Unit]]:
+        """id → its units."""
+        return {name: [self.index.unit(u) for u in g] for name, g in zip(self.names, self.groups)}
 
     @property
     def multivalue(self) -> bool:
         """Whether some unit needs more than one id (the attribute must then be declared multivalue)."""
-        return any(len(v) > 1 for v in self.ids.values())
+        return bool(self.extra)
 
 
-class _Constraints:
-    """What the bitexts say about a pair of units."""
-
-    def __init__(self, bitexts: List[Bitext], on_bitext: Optional[Callable[[], None]] = None) -> None:
-        self.bead_of: List[Dict[Unit, int]] = []                     # per bitext: unit → bead index
-        self.between: Dict[FrozenSet[str], List[int]] = defaultdict(list)
-        self.required: Set[Tuple[Unit, Unit]] = set()
-        for k, bt in enumerate(bitexts):
-            if bt.doc_a == bt.doc_b:
-                raise ValueError(f"bitext {bt.source or k}: both sides are {bt.doc_a}")
-            beads: Dict[Unit, int] = {}
-            for i, bead in enumerate(bt.beads):
-                for u in bead.a:
-                    beads[(bt.doc_a, u)] = i
-                for u in bead.b:
-                    beads[(bt.doc_b, u)] = i
-                for x in bead.a:
-                    for y in bead.b:
-                        self.required.add(_pair((bt.doc_a, x), (bt.doc_b, y)))
-            self.bead_of.append(beads)
-            self.between[frozenset((bt.doc_a, bt.doc_b))].append(k)
-            if on_bitext:
-                on_bitext()
-
-    def forbidden(self, u: Unit, v: Unit) -> bool:
-        if u[0] == v[0]:
-            return False
-        for k in self.between.get(frozenset((u[0], v[0])), ()):
-            bu, bv = self.bead_of[k].get(u), self.bead_of[k].get(v)
-            if bu is not None and bv is not None and bu != bv:
-                return True
-        return False
-
-    def known(self, u: Unit, v: Unit) -> bool:
-        """Some bitext covers both."""
-        return any(u in self.bead_of[k] and v in self.bead_of[k]
-                   for k in self.between.get(frozenset((u[0], v[0])), ()))
-
-    def allowed(self, u: Unit, v: Unit, exact: bool) -> bool:
-        if u[0] == v[0]:
-            return True
-        if self.forbidden(u, v):
-            return False
-        return not exact or self.known(u, v)
-
-
-def _pair(u: Unit, v: Unit) -> Tuple[Unit, Unit]:
+def _pair(u, v):
     return (u, v) if u <= v else (v, u)
 
 
-class _UnionFind:
-    def __init__(self) -> None:
-        self.parent: Dict[Unit, Unit] = {}
-
-    def find(self, x: Unit) -> Unit:
-        self.parent.setdefault(x, x)
-        root = x
-        while self.parent[root] != root:
-            root = self.parent[root]
-        while self.parent[x] != root:
-            self.parent[x], x = root, self.parent[x]
-        return root
-
-    def union(self, a: Unit, b: Unit) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            self.parent[max(ra, rb)] = min(ra, rb)
-
-
-def _clean(comp: List[Unit], cons: _Constraints, exact: bool) -> bool:
+def _clean(comp: List[int], cons: Constraints, exact: bool) -> bool:
     """No forbidden pair inside: per bitext, the members it covers on both sides all sit in one bead."""
+    doc_of = cons.index.doc_of
     per_bitext: Dict[int, Set[int]] = defaultdict(set)
-    sides: Dict[int, Set[str]] = defaultdict(set)
-    docs = {u[0] for u in comp}
+    sides: Dict[int, Set[int]] = defaultdict(set)
+    docs = {doc_of[u] for u in comp}
     for u in comp:
-        for k in (k for d in docs if d != u[0] for k in cons.between.get(frozenset((u[0], d)), ())):
-            b = cons.bead_of[k].get(u)
-            if b is not None:
-                per_bitext[k].add(b)
-                sides[k].add(u[0])
+        du = doc_of[u]
+        for d in docs:
+            if d == du:
+                continue
+            for k in cons.bitexts_between(du, d):
+                b = cons.bead(k, u)
+                if b >= 0:
+                    per_bitext[k].add(b)
+                    sides[k].add(du)
     if any(len(sides[k]) == 2 and len(beads) > 1 for k, beads in per_bitext.items()):
         return False
     if exact:
-        return all(u[0] == v[0] or cons.known(u, v) for i, u in enumerate(comp) for v in comp[i + 1:])
+        return all(cons.same_doc(u, v) or cons.known(u, v) for i, u in enumerate(comp) for v in comp[i + 1:])
     return True
 
 
-# a bead with both sides: (doc A, its units, doc B, its units)
-_BeadUnits = Tuple[str, Tuple[str, ...], str, Tuple[str, ...]]
+# a bead with both sides: its units in document A, its units in document B
+_BeadUnits = Tuple[Tuple[int, ...], Tuple[int, ...]]
 
 
-def _cover(comp: Set[Unit], required: Set[Tuple[Unit, Unit]], beads: List[_BeadUnits], cons: _Constraints,
-           exact: bool) -> List[Set[Unit]]:
+def _cover(comp: Set[int], required: Set[Tuple[int, int]], beads: List[_BeadUnits], cons: Constraints,
+           exact: bool) -> List[Set[int]]:
     """Cliques covering the component's required pairs, none holding a forbidden pair; few memberships."""
-    def valid(clique: Iterable[Unit]) -> bool:
+    def valid(clique: Iterable[int]) -> bool:
         c = sorted(clique)
         return all(cons.allowed(u, v, exact) for i, u in enumerate(c) for v in c[i + 1:])
 
     # start: one clique per bead (a bead holding a contradiction falls back to its pairs)
-    cliques: List[Set[Unit]] = []
-    seen: Set[FrozenSet[Unit]] = set()
-    for doc_a, a, doc_b, b in beads:
-        units = {(doc_a, u) for u in a} | {(doc_b, u) for u in b}
+    cliques: List[Set[int]] = []
+    seen: Set[FrozenSet[int]] = set()
+    for a, b in beads:
+        units = set(a) | set(b)
         if not units <= comp:
             continue
-        parts = [units] if valid(units) else [
-            {(doc_a, x), (doc_b, y)} for x in a for y in b if _pair((doc_a, x), (doc_b, y)) in required]
+        parts = [units] if valid(units) else [{x, y} for x in a for y in b if _pair(x, y) in required]
         for p in parts:
             if frozenset(p) not in seen:
                 seen.add(frozenset(p))
@@ -177,8 +143,8 @@ def _cover(comp: Set[Unit], required: Set[Tuple[Unit, Unit]], beads: List[_BeadU
     return absorbed if size(absorbed) < size(plain) else plain
 
 
-def _absorb(cliques: List[Set[Unit]], required: Set[Tuple[Unit, Unit]], cons: _Constraints,
-            exact: bool) -> List[Set[Unit]]:
+def _absorb(cliques: List[Set[int]], required: Set[Tuple[int, int]], cons: Constraints,
+            exact: bool) -> List[Set[int]]:
     """Each clique takes the units of the cliques it overlaps that it can hold and that have a required pair
     into it."""
     out = [set(c) for c in cliques]
@@ -192,9 +158,9 @@ def _absorb(cliques: List[Set[Unit]], required: Set[Tuple[Unit, Unit]], cons: _C
     return out
 
 
-def _prune(cliques: List[Set[Unit]], required: Set[Tuple[Unit, Unit]]) -> List[Set[Unit]]:
+def _prune(cliques: List[Set[int]], required: Set[Tuple[int, int]]) -> List[Set[int]]:
     """Drop a clique, then a unit in a clique, whose required pairs other cliques already cover."""
-    count: Dict[Tuple[Unit, Unit], int] = defaultdict(int)
+    count: Dict[Tuple[int, int], int] = defaultdict(int)
     for c in cliques:
         for p in _pairs_in(c, required):
             count[p] += 1
@@ -214,12 +180,13 @@ def _prune(cliques: List[Set[Unit]], required: Set[Tuple[Unit, Unit]]) -> List[S
     return [c for c in cliques if _pairs_in(c, required)]
 
 
-def _pairs_in(clique: Set[Unit], required: Set[Tuple[Unit, Unit]]) -> List[Tuple[Unit, Unit]]:
+def _pairs_in(clique: Set[int], required: Set[Tuple[int, int]]) -> List[Tuple[int, int]]:
     c = sorted(clique)
     return [(u, v) for i, u in enumerate(c) for v in c[i + 1:] if (u, v) in required]
 
 
-def _name(groups: List[List[Unit]], prefix: str, previous: Optional[Dict[Unit, List[str]]]) -> List[str]:
+def _name(groups: List[List[int]], prefix: str, previous: Optional[Dict[Unit, List[str]]],
+          unit: Callable[[int], Unit]) -> List[str]:
     """Ids for the groups: old names where a group keeps most of an old id's members, else fresh numbers."""
     names: List[Optional[str]] = [None] * len(groups)
     used: Set[str] = set()
@@ -236,7 +203,7 @@ def _name(groups: List[List[Unit]], prefix: str, previous: Optional[Dict[Unit, L
         for gi, g in enumerate(groups):
             votes: Dict[str, int] = defaultdict(int)
             for u in g:
-                for t in previous.get(u, ()):
+                for t in previous.get(unit(u), ()):
                     votes[t] += 1
             for t, n in votes.items():
                 if 2 * n > len(old_members[t]):   # keeps the majority of the old id's members
@@ -279,146 +246,253 @@ def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str =
         raise ValueError(f"policy: one of {', '.join(POLICIES)}")
     phase = progress or _Silent
     exact = policy == "exact"
+    with phase("number units"):
+        index = UnitIndex.of_bitexts(bitexts)
     with phase("constraints", len(bitexts)) as p:
-        cons = _Constraints(bitexts, on_bitext=p.step)
+        cons = Constraints(bitexts, index, on_bitext=p.step)
+    n = index.size
     with phase("contradictions", len(cons.required)) as p:
-        found = []
-        for pair in cons.required:
+        contradictions = array("q")
+        for key in cons.required:
             p.step()
-            if cons.forbidden(*pair):
-                found.append(pair)
-    contradictions = sorted(found)
-    required = cons.required - set(contradictions) if contradictions else cons.required
+            u, v = divmod(key, n)
+            if cons.forbidden(u, v):
+                contradictions.append(key)
+    if contradictions:
+        dropped = set(contradictions)
+        required = array("q", (key for key in cons.required if key not in dropped))
+    else:
+        required = cons.required
 
-    uf = _UnionFind()
+    parent = array("q", range(n))
+    linked = bytearray(n)
+
+    def find(x: int) -> int:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
     with phase("connect", len(required)) as p:
-        for u, v in required:   # any order: a component's root is always its smallest unit
+        for key in required:   # any order: a component's root is always its smallest unit
             p.step()
-            uf.union(u, v)
-    comps: Dict[Unit, List[Unit]] = defaultdict(list)
-    with phase("components", len(uf.parent)) as p:
-        for u in sorted(uf.parent):
+            u, v = divmod(key, n)
+            linked[u] = linked[v] = 1
+            ru, rv = find(u), find(v)
+            if ru != rv:
+                parent[max(ru, rv)] = min(ru, rv)
+    comps: Dict[int, List[int]] = defaultdict(list)
+    with phase("components", n) as p:
+        for u in range(n):
             p.step()
-            comps[uf.find(u)].append(u)
+            if linked[u]:
+                comps[find(u)].append(u)
+    conflicting: Set[int] = set()
     with phase("clean components", len(comps)) as p:
-        clean = {}
         for root, comp in comps.items():
             p.step()
-            clean[root] = _clean(comp, cons, exact)
-    conflicting = {root for root, ok in clean.items() if not ok}
+            if not _clean(comp, cons, exact):
+                conflicting.add(root)
     # the conflicting components' required pairs and beads (only they read them)
-    req_by_root: Dict[Unit, Set[Tuple[Unit, Unit]]] = defaultdict(set)
-    beads_by_root: Dict[Unit, List[_BeadUnits]] = defaultdict(list)
+    req_by_root: Dict[int, Set[Tuple[int, int]]] = defaultdict(set)
+    beads_by_root: Dict[int, List[_BeadUnits]] = defaultdict(list)
     if conflicting:
         with phase("conflicting pairs", len(required)) as p:
-            for pair in required:
+            for key in required:
                 p.step()
-                root = uf.find(pair[0])
+                u, v = divmod(key, n)
+                root = find(u)
                 if root in conflicting:
-                    req_by_root[root].add(pair)
+                    req_by_root[root].add((u, v))
         with phase("conflicting beads", len(bitexts)) as p:
             for bt in bitexts:
                 p.step()
+                da, db = index.doc_number[bt.doc_a], index.doc_number[bt.doc_b]
                 for bead in bt.beads:
-                    first = (bt.doc_a, bead.a[0]) if bead.a else None
-                    if bead.b and first in uf.parent:
-                        root = uf.find(first)
+                    if not bead.a or not bead.b:
+                        continue
+                    first = index.number(da, bead.a[0])
+                    if linked[first]:
+                        root = find(first)
                         if root in conflicting:
-                            beads_by_root[root].append((bt.doc_a, bead.a, bt.doc_b, bead.b))
+                            beads_by_root[root].append((index.numbers(da, bead.a), index.numbers(db, bead.b)))
+    index.drop_lookup()
 
-    groups: List[List[Unit]] = []
+    groups: List[List[int]] = []
     with phase("cover conflicting", len(conflicting)) as p:
         for root in sorted(comps):
             comp = comps[root]
-            if clean[root]:
+            if root not in conflicting:
                 groups.append(comp)
                 continue
             p.step()
             groups.extend(sorted(sorted(c) for c in _cover(set(comp), req_by_root[root], beads_by_root[root], cons,
                                                            exact)))
+    n_components = len(comps)
+    del comps, req_by_root, beads_by_root, parent, linked
 
     with phase("name ids"):
-        names = _name(groups, prefix, previous)
-    ids: Dict[Unit, List[str]] = defaultdict(list)
-    members: Dict[str, List[Unit]] = {}
+        names = _name(groups, prefix, previous, index.unit)
+    first = array("q", [-1]) * n
+    extra: Dict[int, List[int]] = {}
     with phase("ids per unit", len(groups)) as p:
-        for name, g in zip(names, groups):
+        for gi, g in enumerate(groups):
             p.step()
-            members[name] = g
             for u in g:
-                ids[u].append(name)
+                if first[u] < 0:
+                    first[u] = gi
+                else:
+                    extra.setdefault(u, []).append(gi)
 
-    report = verify(bitexts, ids, policy=policy, cons=cons, progress=phase)
+    report = _verify(cons, groups, first, extra, exact=exact, phase=phase)
+    aligned = sum(1 for g in first if g >= 0)
     report.update({
         "policy": policy,
         "bitexts": len(bitexts),
         "documents": len({d for bt in bitexts for d in (bt.doc_a, bt.doc_b)}),
-        "aligned_units": len(ids),
-        "components": len(comps),
+        "aligned_units": aligned,
+        "components": n_components,
         "conflicting_components": len(conflicting),
-        "ids": len(members),
-        "units_with_several_ids": sum(1 for v in ids.values() if len(v) > 1),
-        "longest_list": max((len(v) for v in ids.values()), default=0),
-        "contradictions": [[list(u), list(v)] for u, v in contradictions],
+        "ids": len(groups),
+        "units_with_several_ids": len(extra),
+        "longest_list": 1 + max(map(len, extra.values())) if extra else (1 if aligned else 0),
+        "contradictions": [[list(index.unit(u)), list(index.unit(v))]
+                           for u, v in (divmod(key, n) for key in contradictions)],
     })
+    result = MergeResult(index, groups, names, first, extra, report)
     if previous is not None:
+        ids = result.ids
         report["units_changed"] = sum(1 for u in set(ids) | set(previous)
                                       if sorted(ids.get(u, [])) != sorted(previous.get(u, [])))
-    return MergeResult(ids=dict(ids), members=members, report=report)
+    return result
 
 
-def verify(bitexts: List[Bitext], ids: Dict[Unit, List[str]], *, policy: str = "pivot",
-           cons: Optional[_Constraints] = None, progress: Optional[Callable] = None) -> Dict[str, object]:
-    """Check an assignment against the bitexts: required pairs share an id, forbidden pairs (and, under `exact`,
-    pairs no bitext covers) do not. Contradicted pairs (required by one bitext, forbidden by another) are left out.
-    `cons`: the bitexts' constraints when already built; `progress` as in merge_bitexts."""
-    phase = progress or _Silent
-    cons = cons or _Constraints(bitexts)
-    exact = policy == "exact"
-    shared = lambda u, v: bool(set(ids.get(u, ())) & set(ids.get(v, ())))   # noqa: E731
+def _verify(cons: Constraints, groups: Sequence[Sequence[int]], first: array, extra: Dict[int, List[int]], *,
+            exact: bool, phase: Callable = _Silent) -> Dict[str, object]:
+    def groups_of(u: int) -> Set[int]:
+        g = first[u]
+        return set() if g < 0 else {g, *extra.get(u, ())}
+
+    n = cons.index.size
     with phase("verify pairs", len(cons.required)) as p:
-        missing = []
-        for pair in cons.required:
+        missing = 0
+        for key in cons.required:
             p.step()
-            if not shared(*pair) and not cons.forbidden(*pair):
-                missing.append(pair)
-    members: Dict[str, List[Unit]] = defaultdict(list)
-    for u, ts in ids.items():
-        for t in ts:
-            members[t].append(u)
-    wrong, inferred = set(), set()
-    with phase("verify ids", len(members)) as p:
-        for us in members.values():
+            u, v = divmod(key, n)
+            if not (groups_of(u) & groups_of(v)) and not cons.forbidden(u, v):
+                missing += 1
+    wrong: Set[int] = set()
+    inferred: Set[int] = set()
+    with phase("verify ids", len(groups)) as p:
+        for us in groups:
             p.step()
             us = sorted(us)
             for i, u in enumerate(us):
                 for v in us[i + 1:]:
-                    if u[0] == v[0]:
+                    if cons.same_doc(u, v):
                         continue
                     if cons.forbidden(u, v) or (exact and not cons.known(u, v)):
-                        wrong.add((u, v))
+                        wrong.add(u * n + v)
                     elif not cons.known(u, v):
-                        inferred.add((u, v))
-    return {"ok": not missing and not wrong, "missing_pairs": len(missing), "forbidden_pairs": len(wrong),
+                        inferred.add(u * n + v)
+    return {"ok": not missing and not wrong, "missing_pairs": missing, "forbidden_pairs": len(wrong),
             "inferred_pairs": len(inferred)}
 
 
-def to_reconcile_payload(result: MergeResult, *, level: str = "s") -> Dict[str, object]:
-    """The reconcile format (`tuids_<level>.json`): one item per id, its members per document."""
-    tuids = []
-    for name, units in result.members.items():
-        per_doc: Dict[str, List[str]] = defaultdict(list)
-        for doc, uid in units:
-            per_doc[doc].append(uid)
-        tuids.append({"tuid": name, "members": dict(per_doc)})
+def verify(bitexts: List[Bitext], ids: Dict[Unit, List[str]], *, policy: str = "pivot",
+           progress: Optional[Callable] = None) -> Dict[str, object]:
+    """Check an assignment against the bitexts: required pairs share an id, forbidden pairs (and, under `exact`,
+    pairs no bitext covers) do not. Contradicted pairs (required by one bitext, forbidden by another) are left out."""
+    index = UnitIndex.of_bitexts(bitexts, extra=ids)
+    cons = Constraints(bitexts, index)
+    number: Dict[str, int] = {}
+    groups: List[List[int]] = []
+    first = array("q", [-1]) * index.size
+    extra: Dict[int, List[int]] = {}
+    for (doc, uid), names in ids.items():
+        u = index.number(index.doc_number[doc], uid)
+        for name in names:
+            if name not in number:
+                number[name] = len(groups)
+                groups.append([])
+            gi = number[name]
+            groups[gi].append(u)
+            if first[u] < 0:
+                first[u] = gi
+            else:
+                extra.setdefault(u, []).append(gi)
+    return _verify(cons, groups, first, extra, exact=policy == "exact", phase=progress or _Silent)
+
+
+def iter_reconcile_tuids(result: MergeResult) -> Iterator[Dict[str, object]]:
+    """The items of the reconcile format, one per id, its members per document."""
+    index = result.index
+    for name, units in zip(result.names, result.groups):
+        per_doc: Dict[str, List[str]] = {}
+        for u in units:
+            doc, uid = index.unit(u)
+            per_doc.setdefault(doc, []).append(uid)
+        yield {"tuid": name, "members": per_doc}
+
+
+def _payload(result: MergeResult, level: str, tuids: Iterable[Dict[str, object]]) -> Dict[str, object]:
+    index = result.index
+    docs = [d for i, d in enumerate(index.docs)
+            if any(result.first[u] >= 0 for u in range(index.start[i], index.start[i + 1]))]
     return {
-        "documents": sorted({u[0] for u in result.ids}),
+        "documents": docs,
         "level": level,
         "assignment": "complete",   # the whole level's ids: apply replaces, not adds
         "multivalue": result.multivalue,
         "tuids": tuids,
         "report": result.report,
     }
+
+
+def to_reconcile_payload(result: MergeResult, *, level: str = "s") -> Dict[str, object]:
+    """The reconcile format (`tuids_<level>.json`): one item per id, its members per document."""
+    return _payload(result, level, list(iter_reconcile_tuids(result)))
+
+
+def write_reconcile_payload(path: Union[str, Path], result: MergeResult, *, level: str = "s",
+                            extra: Optional[Dict[str, object]] = None,
+                            on_id: Optional[Callable[[], None]] = None) -> None:
+    """The reconcile format written id by id (the same bytes as `json.dumps(payload, ensure_ascii=False,
+    indent=1)`, without the whole payload in memory); `extra`: more top-level keys after it."""
+    def tuids() -> Iterator[Dict[str, object]]:
+        for item in iter_reconcile_tuids(result):
+            if on_id:
+                on_id()
+            yield item
+
+    payload = _payload(result, level, tuids())
+    payload.update(extra or {})
+    with open(path, "w", encoding="utf-8", buffering=1 << 20) as f:
+        _dump_streaming(payload, f, stream="tuids")
+
+
+def _dump_streaming(obj: Dict[str, object], f: IO[str], *, stream: str) -> None:
+    """json.dump(obj, indent=1, ensure_ascii=False) with obj[stream] an iterable written item by item."""
+    def dumps(x: object) -> str:
+        return json.dumps(x, ensure_ascii=False, indent=1)
+
+    if not obj:
+        f.write("{}")
+        return
+    f.write("{")
+    for i, (key, value) in enumerate(obj.items()):
+        f.write(("," if i else "") + "\n " + json.dumps(key, ensure_ascii=False) + ": ")
+        if key == stream:
+            wrote = False
+            for item in value:   # type: ignore[union-attr]
+                f.write(("," if wrote else "[") + "\n" + "\n".join("  " + line for line in dumps(item).split("\n")))
+                wrote = True
+            f.write("\n ]" if wrote else "[]")
+        else:
+            f.write(dumps(value).replace("\n", "\n "))
+    f.write("\n}")
 
 
 def from_reconcile_payload(payload: Dict[str, object]) -> Dict[Unit, List[str]]:

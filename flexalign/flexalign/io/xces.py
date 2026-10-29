@@ -12,6 +12,7 @@ the target unit ids, space-separated). Files may be gzipped and large: read stre
 from __future__ import annotations
 
 import gzip
+from sys import intern
 from pathlib import Path
 from typing import IO, Iterator, List, Optional, Union
 
@@ -50,7 +51,8 @@ def iter_xces(path: Union[str, Path], *, strip_gz: bool = True) -> Iterator[Bite
                 xt = elem.get("xtargets") or ""
                 if ";" in xt:
                     a, b = xt.split(";", 1)
-                    current.beads.append(Bead(a=tuple(a.split()), b=tuple(b.split())))
+                    # ids interned: each unit's id string is then held once, not once per bitext that names it
+                    current.beads.append(Bead(a=tuple(map(intern, a.split())), b=tuple(map(intern, b.split()))))
                 elem.clear()
             elif event == "end" and tag == "linkGrp":
                 if current is not None:

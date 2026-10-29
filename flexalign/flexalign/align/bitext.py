@@ -13,6 +13,7 @@ Unit = Tuple[str, str]
 class Bead:
     """Units of document A aligned with units of document B; one side empty = unaligned (1:0, 0:1)."""
 
+    __slots__ = ("a", "b")   # millions of them in a large corpus
     a: Tuple[str, ...]
     b: Tuple[str, ...]
 
