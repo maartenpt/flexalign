@@ -258,7 +258,7 @@ def _name(groups: List[List[Unit]], prefix: str, previous: Optional[Dict[Unit, L
 class _Silent:
     """A progress that shows nothing (merge_bitexts without `progress`)."""
 
-    def __init__(self, *_args, **_kw) -> None:
+    def __init__(self, *_args, **_kw) -> None:   # (label, total=None), as Progress
         pass
 
     def step(self, *_args, **_kw) -> None:
@@ -337,13 +337,16 @@ def merge_bitexts(bitexts: List[Bitext], *, policy: str = "pivot", prefix: str =
             groups.extend(sorted(sorted(c) for c in _cover(set(comp), req_by_root[root], beads_by_root[root], cons,
                                                            exact)))
 
-    names = _name(groups, prefix, previous)
+    with phase("name ids"):
+        names = _name(groups, prefix, previous)
     ids: Dict[Unit, List[str]] = defaultdict(list)
     members: Dict[str, List[Unit]] = {}
-    for name, g in zip(names, groups):
-        members[name] = g
-        for u in g:
-            ids[u].append(name)
+    with phase("ids per unit", len(groups)) as p:
+        for name, g in zip(names, groups):
+            p.step()
+            members[name] = g
+            for u in g:
+                ids[u].append(name)
 
     report = verify(bitexts, ids, policy=policy, cons=cons, progress=phase)
     report.update({

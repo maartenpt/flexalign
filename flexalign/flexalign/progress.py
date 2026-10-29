@@ -36,7 +36,8 @@ def size(n: float) -> str:
 
 
 class Progress:
-    """`with Progress("convert", total=n) as p: … p.step(item="en/a.xml")`; `bytes=True` counts sizes."""
+    """`with Progress("convert", total=n) as p: … p.step(item="en/a.xml")`; `bytes=True` counts sizes. Without
+    `total` and steps it just says the step has started and how long it took (`with Progress("write"):`)."""
 
     def __init__(self, label: str, total: Optional[int] = None, *, bytes: bool = False, indent: str = "  ") -> None:
         self.label, self.total, self.bytes, self.indent = label, total, bytes, indent
@@ -52,13 +53,16 @@ class Progress:
     def _count(self, n: float) -> str:
         return size(n) if self.bytes else str(n)
 
+    def _counted(self) -> bool:
+        return bool(self.total or self.done)
+
     def line(self) -> str:
         elapsed = time.time() - self.start
-        text = f"{self.indent}{self.label} {self._count(self.done)}"
+        text = f"{self.indent}{self.label}" + (f" {self._count(self.done)}" if self._counted() else "")
         if self.total:
             text += f"/{self._count(self.total)} ({100 * self.done / self.total:.0f}%)"
-        text += f", {duration(elapsed)}"
-        if self.total and self.done and elapsed > 5:
+        text += f", {duration(elapsed)}" if self._counted() else " …"
+        if self.total and self.done >= self.total / 100 and elapsed > 5:   # less: too early to tell
             text += f", ~{duration(elapsed * (self.total - self.done) / self.done)} left"
         return text + (f"  {self.current}" if self.current and self.tty else "")
 
@@ -84,7 +88,8 @@ class Progress:
     def finish(self, note: str = "") -> None:
         if not enabled:
             return
-        text = f"{self.indent}{self.label} {self._count(self.done)} in {duration(time.time() - self.start)}"
+        count = f" {self._count(self.done)}" if self._counted() else ""
+        text = f"{self.indent}{self.label}{count} in {duration(time.time() - self.start)}"
         self._write(text + (f" ({note})" if note else ""), end=True)
 
     def __enter__(self) -> "Progress":

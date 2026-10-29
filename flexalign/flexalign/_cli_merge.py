@@ -78,14 +78,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.previous:
         previous = from_reconcile_payload(json.loads(args.previous.read_text(encoding="utf-8")))
     result = merge_bitexts(bitexts, policy=args.policy, prefix=args.prefix, previous=previous, progress=Progress)
-    payload = to_reconcile_payload(result, level=args.level)
+    with Progress("result"):
+        payload = to_reconcile_payload(result, level=args.level)
     if unification is not None:
         payload["unify"] = {
             "documents": unification.report,
             "extras": {doc: [{"unit": e.unit[1], "from": list(e.source), "after": e.after} for e in extras]
                        for doc, extras in unification.extras.items()},
         }
-    args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    with Progress(f"write {args.output.name}"):
+        args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     if progress.enabled:
         print(f"  merge done in {duration(time.time() - started)}", file=sys.stderr)
 
